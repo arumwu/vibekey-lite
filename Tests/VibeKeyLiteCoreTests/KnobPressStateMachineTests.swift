@@ -13,9 +13,17 @@ final class KnobPressStateMachineTests: XCTestCase {
         var machine = KnobPressStateMachine(longPressThreshold: 0.65)
 
         _ = machine.pressDown(at: 20)
-        XCTAssertEqual(machine.longPressTimerFired(at: 20.65), .switchProfile)
-        XCTAssertNil(machine.longPressTimerFired(at: 21))
+        XCTAssertEqual(machine.longPressTimerFired(), .switchProfile)
+        XCTAssertNil(machine.longPressTimerFired())
         XCTAssertNil(machine.pressUp(at: 21.1))
+    }
+
+    func testLongPressTimerOnlyNeedsAnActivePress() {
+        var machine = KnobPressStateMachine(longPressThreshold: 0.65)
+
+        XCTAssertNil(machine.longPressTimerFired())
+        _ = machine.pressDown(at: 500_000)
+        XCTAssertEqual(machine.longPressTimerFired(), .switchProfile)
     }
 
     func testLateReleaseStillCountsAsLongPressIfTimerWasDelayed() {

@@ -7,6 +7,7 @@ BUILD_CONFIGURATION="release"
 OUTPUT_DIR="$PROJECT_DIR/.build/app"
 APP_DIR="$OUTPUT_DIR/$APP_NAME.app"
 EXPECTED_APP_DIR="$PROJECT_DIR/.build/app/VibeKey Lite.app"
+SIGNING_IDENTITY=${VIBEKEY_SIGNING_IDENTITY:--}
 
 if [ "$(uname -m)" != "arm64" ]; then
     echo "VibeKey Lite currently supports Apple Silicon (arm64) only." >&2
@@ -30,7 +31,7 @@ mkdir -p "$CONTENTS_DIR/MacOS" "$CONTENTS_DIR/Resources"
 cp "$BIN_DIR/VibeKeyLite" "$CONTENTS_DIR/MacOS/VibeKeyLite"
 cp "$PROJECT_DIR/AppResources/Info.plist" "$CONTENTS_DIR/Info.plist"
 
-codesign --force --sign - --identifier io.github.arumwu.VibeKeyLite "$STAGING_APP"
+codesign --force --sign "$SIGNING_IDENTITY" --identifier io.github.arumwu.VibeKeyLite "$STAGING_APP"
 
 if [ "$APP_DIR" != "$EXPECTED_APP_DIR" ]; then
     echo "Refusing to replace unexpected app path: $APP_DIR" >&2

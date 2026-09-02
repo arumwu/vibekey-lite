@@ -18,10 +18,10 @@ public enum VibeKeyPacketCodec {
     public static let packetLength = 64
 
     private static let key: [UInt32] = [
-        0xCABAA5CA,
-        0x6D8A2ABC,
-        0xBA9E5ACA,
-        0xCA8BB89B
+        0xCAA5BACA,
+        0xBC2A8A6D,
+        0xCA5A9EBA,
+        0x9BB88BCA
     ]
     private static let delta: UInt32 = 0x9E3779B9
 

@@ -12,9 +12,9 @@ final class VibeKeyPacketCodecTests: XCTestCase {
         let report = try VibeKeyPacketCodec.outputReport(encrypting: plaintext)
         let expectedPrefix: [UInt8] = [
             0x55,
-            0x51, 0xA3, 0xCF, 0x7E, 0x19, 0x7B, 0x40, 0x32,
-            0x99, 0x49, 0x8F, 0xC4, 0x6C, 0x40, 0xB5, 0x95,
-            0x99, 0x49, 0x8F, 0xC4, 0x6C, 0x40, 0xB5
+            0x57, 0xDF, 0x12, 0xE6, 0x02, 0xD7, 0x9D, 0xFD,
+            0x38, 0x90, 0xC4, 0x99, 0xA3, 0x60, 0xAA, 0xAD,
+            0x38, 0x90, 0xC4, 0x99, 0xA3, 0x60, 0xAA
         ]
 
         XCTAssertEqual(report.count, 64)
@@ -32,7 +32,7 @@ final class VibeKeyPacketCodecTests: XCTestCase {
 
         XCTAssertEqual(
             Array(encrypted.prefix(8)),
-            [0xF5, 0x18, 0x84, 0x1F, 0xFE, 0x11, 0x41, 0x8F]
+            [0x2F, 0xFE, 0x1A, 0xAD, 0x13, 0x00, 0x5A, 0x55]
         )
     }
 
@@ -49,11 +49,15 @@ final class VibeKeyPacketCodecTests: XCTestCase {
         XCTAssertTrue(plaintext.dropFirst(9).allSatisfy { $0 == 0 })
     }
 
-    func testShortcutReportHasExpectedShape() throws {
-        let report = try VibeKeyPacketCodec.shortcutReport(index: 0, usbHIDUsage: 0x6B)
+    func testKnobPressF13ReportMatchesVendorRuntimeVector() throws {
+        let report = try VibeKeyPacketCodec.shortcutReport(index: 3, usbHIDUsage: 0x68)
 
         XCTAssertEqual(report.count, 64)
-        XCTAssertEqual(report.first, 0x55)
+        XCTAssertEqual(Array(report.prefix(17)), [
+            0x55,
+            0xC9, 0x29, 0xAA, 0xDC, 0xFF, 0x7C, 0xF9, 0x70,
+            0x49, 0x44, 0x98, 0x0E, 0xC1, 0x4E, 0x7C, 0x51
+        ])
     }
 
     func testRejectsWrongPlaintextLength() {

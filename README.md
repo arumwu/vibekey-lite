@@ -26,6 +26,12 @@ swift test
 open '.build/app/VibeKey Lite.app'
 ```
 
+若要讓 macOS 在更新 App 後保留「輸入監控」與「輔助使用」授權，請用同一張有效簽章建置：
+
+```sh
+VIBEKEY_SIGNING_IDENTITY="Apple Development: Your Name (TEAMID)" ./build-app.sh
+```
+
 成品位於 `.build/app/VibeKey Lite.app`，建置流程不會自動安裝到 `/Applications`。
 
 ## 第一次使用
@@ -85,6 +91,12 @@ Requires an Apple Silicon Mac, macOS 13 or newer, and Xcode Command Line Tools. 
 swift test
 ./build-app.sh
 open '.build/app/VibeKey Lite.app'
+```
+
+To keep Input Monitoring and Accessibility grants across app updates, build every version with the same valid signing identity:
+
+```sh
+VIBEKEY_SIGNING_IDENTITY="Apple Development: Your Name (TEAMID)" ./build-app.sh
 ```
 
 The bundle is written to `.build/app/VibeKey Lite.app`; the script does not install it into `/Applications`.

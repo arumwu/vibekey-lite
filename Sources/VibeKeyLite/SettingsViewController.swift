@@ -4,7 +4,7 @@ import VibeKeyLiteCore
 final class SettingsViewController: NSViewController {
     var onProfileSelected: ((ProfileID) -> Void)?
     var onMappingChanged: ((ProfileID, InputControl, KeyAction) -> Void)?
-    var onRetryListener: (() -> Void)?
+    var onRestartApplication: (() -> Void)?
     var onSyncHardware: (() -> Void)?
     var onQuit: (() -> Void)?
 
@@ -40,7 +40,7 @@ final class SettingsViewController: NSViewController {
     }
 
     override func loadView() {
-        view = NSView(frame: NSRect(x: 0, y: 0, width: 390, height: 425))
+        view = NSView(frame: NSRect(x: 0, y: 0, width: 390, height: 365))
 
         let title = NSTextField(labelWithString: "VibeKey Lite")
         title.font = .systemFont(ofSize: 18, weight: .semibold)
@@ -77,9 +77,9 @@ final class SettingsViewController: NSViewController {
         statusLabel.font = .systemFont(ofSize: 11)
 
         let retryButton = NSButton(
-            title: "重新檢查權限",
+            title: "套用並重啟",
             target: self,
-            action: #selector(retryListener(_:))
+            action: #selector(restartApplication(_:))
         )
         retryButton.bezelStyle = .rounded
 
@@ -240,8 +240,8 @@ final class SettingsViewController: NSViewController {
         onMappingChanged?(configuration.activeProfile, control, action)
     }
 
-    @objc private func retryListener(_ sender: Any?) {
-        onRetryListener?()
+    @objc private func restartApplication(_ sender: Any?) {
+        onRestartApplication?()
     }
 
     @objc private func syncHardware(_ sender: Any?) {

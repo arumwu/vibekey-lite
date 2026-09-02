@@ -1,6 +1,7 @@
 import Foundation
 import IOKit.hid
 import Darwin
+import OSLog
 import VibeKeyLiteCore
 
 enum IOKitHardwareListenerError: LocalizedError {
@@ -22,6 +23,10 @@ final class IOKitHardwareListener {
     private var manager: IOHIDManager?
     private var edgeTracker = HIDKeyEdgeTracker()
     private var connected = false
+    private let logger = Logger(
+        subsystem: "io.github.arumwu.VibeKeyLite",
+        category: "HID"
+    )
 
     init(
         eventHandler: @escaping (DeviceEvent, TimeInterval) -> Void,
@@ -110,6 +115,9 @@ final class IOKitHardwareListener {
         let usagePage = IOHIDElementGetUsagePage(element)
         let usage = IOHIDElementGetUsage(element)
         let integerValue = IOHIDValueGetIntegerValue(value)
+        logger.notice(
+            "HID value: report=\(reportID, privacy: .public) page=\(usagePage, privacy: .public) usage=\(usage, privacy: .public) value=\(integerValue, privacy: .public)"
+        )
 
         guard reportID == HardwareEventMapper.keyboardReportID,
               usagePage == HardwareEventMapper.keyboardUsagePage,

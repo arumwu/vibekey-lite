@@ -24,10 +24,8 @@ public struct KnobPressStateMachine: Equatable, Sendable {
         return .scheduleLongPress(after: longPressThreshold)
     }
 
-    public mutating func longPressTimerFired(at timestamp: TimeInterval) -> KnobPressDecision? {
-        guard let pressedAt,
-              !longPressTriggered,
-              reachedThreshold(timestamp - pressedAt) else {
+    public mutating func longPressTimerFired() -> KnobPressDecision? {
+        guard pressedAt != nil, !longPressTriggered else {
             return nil
         }
 

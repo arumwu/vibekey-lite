@@ -1,4 +1,5 @@
 import AppKit
+import OSLog
 import VibeKeyLiteCore
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
@@ -12,6 +13,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let actionPerformer = ActionPerformer()
     private var knobPressStateMachine = KnobPressStateMachine()
     private var knobPressTimer: Timer?
+    private let logger = Logger(
+        subsystem: "io.github.arumwu.VibeKeyLite",
+        category: "HID"
+    )
 
     private var listenerActive = false
     private var accessibilityGranted = false
@@ -73,8 +78,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.persistConfiguration()
             self.refreshUI()
         }
-        settings.onRetryListener = { [weak self] in
-            self?.startHardwareListener(promptForPermission: true)
+        settings.onRestartApplication = { [weak self] in
+            self?.restartApplication()
         }
         settings.onSyncHardware = { [weak self] in
             self?.confirmAndSyncHardware()
@@ -87,7 +92,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let popover = NSPopover()
         popover.behavior = .transient
         popover.animates = true
-        popover.contentSize = NSSize(width: 390, height: 425)
+        popover.contentSize = NSSize(width: 390, height: 365)
         popover.contentViewController = settings
         self.popover = popover
     }
@@ -111,6 +116,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         hardwareListener = listener
         startHardwareListener(promptForPermission: true)
+    }
+
+    private func restartApplication() {
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.createsNewApplicationInstance = true
+        NSWorkspace.shared.openApplication(
+            at: Bundle.main.bundleURL,
+            configuration: configuration
+        ) { [weak self] _, error in
+            DispatchQueue.main.async {
+                if let error {
+                    self?.notice = "重新啟動失敗：\(error.localizedDescription)"
+                    self?.refreshUI()
+                    return
+                }
+                NSApplication.shared.terminate(nil)
+            }
+        }
     }
 
     private func startHardwareListener(promptForPermission: Bool) {
@@ -153,6 +176,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func handle(_ deviceEvent: DeviceEvent, at timestamp: TimeInterval) {
+        let eventTime = String(format: "%.6f", timestamp)
+        logger.notice(
+            "HID event: \(String(describing: deviceEvent), privacy: .public) time=\(eventTime, privacy: .public)"
+        )
         switch deviceEvent {
         case let .key(control: .knobPress, phase: phase):
             handleKnobPress(phase, at: timestamp)
@@ -179,14 +206,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func applyKnobPressDecision(_ decision: KnobPressDecision) {
+        logger.notice("Knob decision: \(String(describing: decision), privacy: .public)")
         switch decision {
         case let .scheduleLongPress(delay):
             knobPressTimer?.invalidate()
             let timer = Timer(timeInterval: delay, repeats: false) { [weak self] _ in
                 guard let self else { return }
                 self.knobPressTimer = nil
-                let timestamp = HIDMonotonicClock.now
-                if let decision = self.knobPressStateMachine.longPressTimerFired(at: timestamp) {
+                if let decision = self.knobPressStateMachine.longPressTimerFired() {
                     self.applyKnobPressDecision(decision)
                 }
             }
@@ -217,6 +244,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func switchProfile() {
         configuration.activeProfile = configuration.activeProfile.toggled
+        logger.notice(
+            "Profile switched to \(self.configuration.activeProfile.rawValue, privacy: .public)"
+        )
+        notice = "已切換到「\(configuration.activeProfile.displayName)」設定組。"
         persistConfiguration()
         refreshUI()
     }
