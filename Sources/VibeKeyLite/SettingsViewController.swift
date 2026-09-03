@@ -13,6 +13,8 @@ final class SettingsViewController: NSViewController {
     private var listenerActive = false
     private var accessibilityGranted = false
     private var deviceConnected = false
+    private var powerStatus = VibeKeyPowerSnapshot()
+    private var powerSaving = false
     private var hardwareSyncInProgress = false
     private var notice: String?
 
@@ -145,6 +147,8 @@ final class SettingsViewController: NSViewController {
         listenerActive: Bool,
         accessibilityGranted: Bool,
         deviceConnected: Bool,
+        powerStatus: VibeKeyPowerSnapshot,
+        powerSaving: Bool,
         hardwareSyncInProgress: Bool,
         notice: String?
     ) {
@@ -152,6 +156,8 @@ final class SettingsViewController: NSViewController {
         self.listenerActive = listenerActive
         self.accessibilityGranted = accessibilityGranted
         self.deviceConnected = deviceConnected
+        self.powerStatus = powerStatus
+        self.powerSaving = powerSaving
         self.hardwareSyncInProgress = hardwareSyncInProgress
         self.notice = notice
 
@@ -257,14 +263,18 @@ final class SettingsViewController: NSViewController {
             popup?.isEnabled = !hardwareSyncInProgress
         }
 
+        let statusMessage: String
         if !accessibilityGranted {
-            statusLabel.stringValue = notice ?? "原生六鍵仍可用；允許輔助使用後才會啟用多重手勢。"
+            statusMessage = notice ?? "原生六鍵仍可用；允許輔助使用後才會啟用多重手勢。"
             statusLabel.textColor = .systemOrange
         } else if !listenerActive {
-            statusLabel.stringValue = notice ?? "原生按鍵仍可用；允許輸入監控後才能長按切換。"
+            statusMessage = notice ?? "原生按鍵仍可用；允許輸入監控後才能長按切換。"
             statusLabel.textColor = .systemOrange
+        } else if powerSaving {
+            statusMessage = notice ?? "閒置省電中；第一下使用原生單按，接著恢復三種手勢。"
+            statusLabel.textColor = .secondaryLabelColor
         } else if let notice {
-            statusLabel.stringValue = notice
+            statusMessage = notice
             if notice.hasPrefix("已寫入") {
                 statusLabel.textColor = .systemGreen
             } else if notice.hasPrefix("正在寫入") {
@@ -274,12 +284,44 @@ final class SettingsViewController: NSViewController {
             }
         } else if deviceConnected {
             let offlineName = configuration.offlineProfile?.displayName ?? "尚未設定"
-            statusLabel.stringValue = "AU05 已連接；三種手勢可用。離線備用：\(offlineName)。"
+            statusMessage = "AU05 已連接；三種手勢可用。離線備用：\(offlineName)。"
             statusLabel.textColor = .secondaryLabelColor
         } else {
-            statusLabel.stringValue = "權限可用，正在等待 AU05。"
+            statusMessage = "權限可用，正在等待 AU05。"
             statusLabel.textColor = .secondaryLabelColor
         }
+
+        statusLabel.stringValue = "\(powerSummary)\n\(statusMessage)"
+    }
+
+    private var powerSummary: String {
+        let batteryText: String
+        if let battery = powerStatus.battery {
+            if battery.isCharging {
+                batteryText = "充電中 \(battery.percent)%"
+            } else if battery.isFullyCharged {
+                batteryText = "已充滿 \(battery.percent)%"
+            } else {
+                batteryText = "電量 \(battery.percent)%"
+            }
+        } else {
+            batteryText = "電量 —"
+        }
+
+        let standbyText = powerStatus.standbyTimeSeconds.map(Self.durationText) ?? "—"
+        let sleepText = powerStatus.sleepTimeSeconds.map(Self.durationText) ?? "—"
+        let stateText = powerSaving || powerStatus.isStandby == true ? "　省電中" : ""
+        return "\(batteryText)　待機 \(standbyText)　關機 \(sleepText)\(stateText)"
+    }
+
+    private static func durationText(_ seconds: UInt32) -> String {
+        if seconds > 0, seconds.isMultiple(of: 3_600) {
+            return "\(seconds / 3_600) 小時"
+        }
+        if seconds > 0, seconds.isMultiple(of: 60) {
+            return "\(seconds / 60) 分"
+        }
+        return "\(seconds) 秒"
     }
 
     @objc private func profileChanged(_ sender: NSSegmentedControl) {

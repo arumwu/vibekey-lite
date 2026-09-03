@@ -60,6 +60,21 @@ public enum VibeKeyPacketCodec {
         try outputReport(encrypting: softwareOnlinePlaintext(enabled))
     }
 
+    /// Builds a read-only request for one of the AU05 power values.
+    /// These requests do not change the device's persisted power settings.
+    public static func powerQueryPlaintext(_ query: VibeKeyPowerQuery) -> [UInt8] {
+        var plaintext = [UInt8](repeating: 0, count: packetLength)
+        plaintext[0] = 0x01
+        plaintext[1] = query.commandGroup
+        plaintext[2] = query.commandID
+        plaintext[3] = 0x01
+        return plaintext
+    }
+
+    public static func powerQueryReport(_ query: VibeKeyPowerQuery) throws -> [UInt8] {
+        try outputReport(encrypting: powerQueryPlaintext(query))
+    }
+
     /// Input callbacks differ on whether report ID 0x55 is included. Only
     /// complete TEA blocks are needed to decode the event header.
     public static func decryptInputReport(_ report: [UInt8]) throws -> [UInt8] {

@@ -15,6 +15,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var knobPressStateMachine = KnobPressStateMachine()
     private var knobLongPressTimer: Timer?
     private var knobSinglePressTimer: Timer?
+    private var powerHandoffTimer: Timer?
+    private var powerHandoffStateMachine = VibeKeyPowerHandoffStateMachine(idleInterval: 300)
     private let logger = Logger(
         subsystem: "io.github.arumwu.VibeKeyLite",
         category: "HID"
@@ -23,6 +25,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var listenerActive = false
     private var accessibilityGranted = false
     private var deviceConnected = false
+    private var devicePowerStatus = VibeKeyPowerSnapshot()
+    private var powerSaving = false
     private var hardwareSyncInProgress = false
     private var vendorInterferedDuringHardwareSync = false
     private var needsHardwareSync = false
@@ -66,6 +70,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let notificationCenter = NSWorkspace.shared.notificationCenter
         workspaceObservers.forEach(notificationCenter.removeObserver)
         workspaceObservers.removeAll()
+        powerHandoffTimer?.invalidate()
+        powerHandoffTimer = nil
         resetKnobPressState()
         actionPerformer.releaseAll()
         if let error = hardwareListener?.stop() {
@@ -172,9 +178,51 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             eventHandler: { [weak self] deviceEvent, timestamp in
                 self?.handle(deviceEvent, at: timestamp)
             },
+            powerResponseHandler: { [weak self] response in
+                guard let self else { return }
+                self.devicePowerStatus.apply(response)
+                if case let .standbyTime(seconds) = response {
+                    self.applyPowerHandoffDecisions(
+                        self.powerHandoffStateMachine.updateIdleInterval(
+                            TimeInterval(seconds),
+                            at: HIDMonotonicClock.now
+                        )
+                    )
+                }
+                self.refreshUI()
+            },
+            noticeHandler: { [weak self] notice in
+                guard let self else { return }
+                if case let .standby(status) = notice {
+                    self.devicePowerStatus.isStandby = status != 0
+                }
+                self.applyPowerHandoffDecisions(
+                    self.powerHandoffStateMachine.noticeReceived(notice)
+                )
+                self.refreshUI()
+            },
+            powerSavingWakeHandler: { [weak self] in
+                guard let self else { return }
+                self.applyPowerHandoffDecisions(
+                    self.powerHandoffStateMachine.wakeInputReceived()
+                )
+            },
             connectionHandler: { [weak self] connected in
                 guard let self else { return }
                 self.deviceConnected = connected
+                if !connected {
+                    self.devicePowerStatus = VibeKeyPowerSnapshot()
+                    self.powerSaving = false
+                    self.cancelPowerHandoff(
+                        reason: .onlinePrerequisiteLost
+                    )
+                } else {
+                    self.applyPowerHandoffDecisions(
+                        self.powerHandoffStateMachine.onlineStarted(
+                            at: HIDMonotonicClock.now
+                        )
+                    )
+                }
                 if connected, self.notice?.hasPrefix("AU05 已移除") == true {
                     self.notice = nil
                 }
@@ -215,7 +263,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            self?.resumeEnhancedModeIfSafe()
+            self?.resumeAfterUserActivityIfNeeded()
         })
 
         workspaceObservers.append(center.addObserver(
@@ -248,13 +296,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return application?.bundleIdentifier == "ulanzi.UlanziStudio"
     }
 
-    private func stopEnhancedMode(notice: String) {
-        let offlineError = suspendEnhancedMode()
+    private func stopEnhancedMode(
+        notice: String,
+        reason: VibeKeyPowerHandoffSuspensionReason = .onlinePrerequisiteLost
+    ) {
+        let offlineError = suspendEnhancedMode(reason: reason)
         self.notice = offlineError?.localizedDescription ?? notice
         refreshUI()
     }
 
-    private func suspendEnhancedMode() -> Error? {
+    private func suspendEnhancedMode(
+        reason: VibeKeyPowerHandoffSuspensionReason = .onlinePrerequisiteLost
+    ) -> Error? {
+        cancelPowerHandoff(reason: reason)
         cancelPendingInput()
         let hadAttachedDevice = hardwareListener?.hasAttachedDevice == true
         let offlineError = hardwareListener?.stop()
@@ -265,13 +319,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         listenerActive = false
         deviceConnected = false
+        devicePowerStatus = VibeKeyPowerSnapshot()
+        powerSaving = false
         return offlineError
     }
 
     private func toggleEnhancedMode() {
         if listenerActive {
             enhancedModeRequested = false
-            stopEnhancedMode(notice: "已切回 AU05 原生六鍵。")
+            stopEnhancedMode(
+                notice: "已切回 AU05 原生六鍵。",
+                reason: .manualNative
+            )
             return
         }
 
@@ -289,6 +348,86 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
               !hardwareSyncInProgress,
               !needsHardwareSync else { return }
         startHardwareListener(promptForPermission: false)
+    }
+
+    private func resumeAfterUserActivityIfNeeded() {
+        if powerSaving {
+            applyPowerHandoffDecisions(
+                powerHandoffStateMachine.wakeInputReceived()
+            )
+        } else {
+            resumeEnhancedModeIfSafe()
+        }
+    }
+
+    private func applyPowerHandoffDecisions(
+        _ decisions: [VibeKeyPowerHandoffDecision]
+    ) {
+        for decision in decisions {
+            switch decision {
+            case let .scheduleStandbyHandoff(deadline):
+                powerHandoffTimer?.invalidate()
+                let delay = max(0, deadline - HIDMonotonicClock.now)
+                let timer = Timer(timeInterval: delay, repeats: false) { [weak self] _ in
+                    guard let self else { return }
+                    self.powerHandoffTimer = nil
+                    self.applyPowerHandoffDecisions(
+                        self.powerHandoffStateMachine.standbyHandoffDeadlineReached(
+                            at: HIDMonotonicClock.now
+                        )
+                    )
+                }
+                powerHandoffTimer = timer
+                RunLoop.main.add(timer, forMode: .common)
+
+            case .cancelStandbyHandoff:
+                powerHandoffTimer?.invalidate()
+                powerHandoffTimer = nil
+
+            case .handoffForStandby:
+                guard listenerActive,
+                      deviceConnected,
+                      !hardwareSyncInProgress,
+                      !needsHardwareSync else {
+                    cancelPowerHandoff(reason: .onlinePrerequisiteLost)
+                    return
+                }
+                cancelPendingInput()
+                if let error = hardwareListener?.enterPowerSavingMode() {
+                    let stopError = suspendEnhancedMode()
+                    notice = (stopError ?? error).localizedDescription
+                } else {
+                    powerSaving = true
+                    notice = "閒置省電中；第一下使用原生單按，接著恢復三種手勢。"
+                }
+                refreshUI()
+
+            case .resumeOnline:
+                guard powerSaving else { continue }
+                if let error = hardwareListener?.resumeFromPowerSaving() {
+                    let stopError = suspendEnhancedMode()
+                    notice = (stopError ?? error).localizedDescription
+                } else {
+                    powerSaving = false
+                    devicePowerStatus.isStandby = false
+                    if notice?.hasPrefix("閒置省電中") == true {
+                        notice = nil
+                    }
+                    applyPowerHandoffDecisions(
+                        powerHandoffStateMachine.onlineStarted(
+                            at: HIDMonotonicClock.now
+                        )
+                    )
+                }
+                refreshUI()
+            }
+        }
+    }
+
+    private func cancelPowerHandoff(reason: VibeKeyPowerHandoffSuspensionReason) {
+        powerHandoffTimer?.invalidate()
+        powerHandoffTimer = nil
+        _ = powerHandoffStateMachine.suspendAutomaticResume(reason: reason)
     }
 
     private func restartApplication() {
@@ -398,9 +537,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func handleDeviceRemoval() {
+        cancelPowerHandoff(reason: .onlinePrerequisiteLost)
         cancelPendingInput()
         offlineStateUnconfirmed = false
         deviceConnected = false
+        devicePowerStatus = VibeKeyPowerSnapshot()
+        powerSaving = false
         notice = "AU05 已移除；未完成的旋鈕按壓已取消。"
         refreshUI()
     }
@@ -410,6 +552,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
               deviceConnected,
               !hardwareSyncInProgress,
               !needsHardwareSync else { return }
+        applyPowerHandoffDecisions(
+            powerHandoffStateMachine.deviceInput(at: timestamp)
+        )
         let eventTime = String(format: "%.6f", timestamp)
         logger.notice(
             "HID event: \(String(describing: deviceEvent), privacy: .public) time=\(eventTime, privacy: .public)"
@@ -643,6 +788,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private var onlinePreflightIsValid: Bool {
         guard configurationReady,
+              enhancedModeRequested,
               configuration.offlineProfile != nil,
               !needsHardwareSync,
               vendorApplicationIsNotRunning,
@@ -704,6 +850,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             listenerActive: listenerActive,
             accessibilityGranted: accessibilityGranted,
             deviceConnected: deviceConnected,
+            powerStatus: devicePowerStatus,
+            powerSaving: powerSaving,
             hardwareSyncInProgress: hardwareSyncInProgress,
             notice: notice
         )
@@ -713,7 +861,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let button = statusItem?.button else { return }
 
         let profileName = configuration.activeProfile.displayName
-        let accessibleName = "VibeKey Lite：\(profileName)"
+        let batteryDescription = devicePowerStatus.battery.map {
+            "，電量 \($0.percent)%"
+        } ?? ""
+        let accessibleName = "VibeKey Lite：\(profileName)\(batteryDescription)"
         let preferredSymbol = configuration.activeProfile == .a
             ? "sparkles"
             : "slider.horizontal.3"
@@ -754,7 +905,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let button = statusItem?.button,
               let popover,
               !popover.isShown else { return }
+        resumeAfterUserActivityIfNeeded()
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        hardwareListener?.refreshPowerStatus()
         NSApplication.shared.activate(ignoringOtherApps: true)
     }
 }

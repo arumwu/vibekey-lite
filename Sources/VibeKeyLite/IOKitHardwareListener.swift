@@ -9,6 +9,7 @@ enum IOKitHardwareListenerError: LocalizedError {
     case heartbeatWriteFailed(code: IOReturn)
     case offlineWriteFailed(code: IOReturn)
     case onlinePrerequisiteLost
+    case invalidPowerSavingTransition
 
     var errorDescription: String? {
         switch self {
@@ -20,6 +21,8 @@ enum IOKitHardwareListenerError: LocalizedError {
             "AU05 離線指令失敗（\(Self.hex(code))）；請結束 App，等待裝置自動恢復。"
         case .onlinePrerequisiteLost:
             "進階手勢已停止；AU05 已退回裝置原生按鍵。"
+        case .invalidPowerSavingTransition:
+            "AU05 省電模式狀態已改變；請重新啟動 VibeKey Lite。"
         }
     }
 
@@ -33,6 +36,9 @@ enum IOKitHardwareListenerError: LocalizedError {
 /// offline report; firmware timeout is the crash-only fallback.
 final class IOKitHardwareListener {
     private let eventHandler: (DeviceEvent, TimeInterval) -> Void
+    private let powerResponseHandler: (VibeKeyPowerResponse) -> Void
+    private let noticeHandler: (VibeKeyDeviceNotice) -> Void
+    private let powerSavingWakeHandler: () -> Void
     private let connectionHandler: (Bool) -> Void
     private let failureHandler: (Error) -> Void
     private let deviceRemovalHandler: () -> Void
@@ -41,12 +47,19 @@ final class IOKitHardwareListener {
     private var inputDevice: IOHIDDevice?
     private var inputReportBuffer: UnsafeMutablePointer<UInt8>?
     private var inputReportCapacity = 0
+    private var wakeDevice: IOHIDDevice?
+    private var wakeReportBuffer: UnsafeMutablePointer<UInt8>?
+    private var wakeReportCapacity = 0
     private var heartbeatTimer: Timer?
     private var heartbeatFailureReported = false
     private var heartbeatInFlight = false
     private var onlineGeneration: UInt64 = 0
     private var pressedControls: Set<InputControl> = []
     private var connected = false
+    private var isRunning = false
+    private var parkedForPowerSaving = false
+    private var wakeRequestDelivered = false
+    private var nativeWakeReportID: UInt32?
     private let heartbeatInterval: TimeInterval
     private let logger = Logger(
         subsystem: "io.github.arumwu.VibeKeyLite",
@@ -57,9 +70,59 @@ final class IOKitHardwareListener {
         inputDevice != nil
     }
 
+    /// Refreshes runtime-only power information. This performs GET requests
+    /// only and never changes the device's saved timers.
+    func refreshPowerStatus() {
+        guard !parkedForPowerSaving else { return }
+        sendPowerQueriesAsynchronously()
+    }
+
+    /// Stops host-online traffic without closing either HID interface. The
+    /// AU05 immediately regains its native mapping and can use its own saved
+    /// standby and power-off timers.
+    func enterPowerSavingMode() -> Error? {
+        guard inputDevice != nil, connected, !parkedForPowerSaving else {
+            return IOKitHardwareListenerError.invalidPowerSavingTransition
+        }
+        let error = leaveOnlineMode()
+        guard error == nil else { return error }
+        parkedForPowerSaving = true
+        wakeRequestDelivered = false
+        nativeWakeReportID = nil
+        pressedControls.removeAll(keepingCapacity: true)
+        logger.notice("AU05 handed back to native power saving")
+        return nil
+    }
+
+    /// Re-enters host-online mode after the first native wake input.
+    func resumeFromPowerSaving() -> Error? {
+        guard parkedForPowerSaving, let device = inputDevice else {
+            return IOKitHardwareListenerError.invalidPowerSavingTransition
+        }
+        guard shouldRemainOnline() else {
+            return IOKitHardwareListenerError.onlinePrerequisiteLost
+        }
+        if let error = enterOnlineModeSynchronously(on: device) {
+            return error
+        }
+
+        parkedForPowerSaving = false
+        wakeRequestDelivered = false
+        nativeWakeReportID = nil
+        heartbeatFailureReported = false
+        onlineGeneration &+= 1
+        startHeartbeat()
+        refreshPowerStatus()
+        logger.notice("AU05 resumed host-online mode after native wake input")
+        return nil
+    }
+
     init(
         heartbeatInterval: TimeInterval = 0.8,
         eventHandler: @escaping (DeviceEvent, TimeInterval) -> Void,
+        powerResponseHandler: @escaping (VibeKeyPowerResponse) -> Void,
+        noticeHandler: @escaping (VibeKeyDeviceNotice) -> Void,
+        powerSavingWakeHandler: @escaping () -> Void,
         connectionHandler: @escaping (Bool) -> Void,
         failureHandler: @escaping (Error) -> Void,
         deviceRemovalHandler: @escaping () -> Void,
@@ -67,6 +130,9 @@ final class IOKitHardwareListener {
     ) {
         self.heartbeatInterval = heartbeatInterval
         self.eventHandler = eventHandler
+        self.powerResponseHandler = powerResponseHandler
+        self.noticeHandler = noticeHandler
+        self.powerSavingWakeHandler = powerSavingWakeHandler
         self.connectionHandler = connectionHandler
         self.failureHandler = failureHandler
         self.deviceRemovalHandler = deviceRemovalHandler
@@ -83,15 +149,24 @@ final class IOKitHardwareListener {
 
         let options = IOOptionBits(kIOHIDOptionsTypeNone)
         let manager = IOHIDManagerCreate(kCFAllocatorDefault, options)
-        let matching: [String: Any] = [
+        let customMatching: [String: Any] = [
             kIOHIDVendorIDKey: NSNumber(value: VibeKeyHIDDescriptor.vibeKey.vendorID),
             kIOHIDProductIDKey: NSNumber(value: VibeKeyHIDDescriptor.vibeKey.productID),
             kIOHIDPrimaryUsagePageKey: NSNumber(value: VibeKeyHIDDescriptor.vibeKey.usagePage),
             kIOHIDPrimaryUsageKey: NSNumber(value: 1)
         ]
+        let nativeWakeMatching: [String: Any] = [
+            kIOHIDVendorIDKey: NSNumber(value: VibeKeyHIDDescriptor.vibeKey.vendorID),
+            kIOHIDProductIDKey: NSNumber(value: VibeKeyHIDDescriptor.vibeKey.productID),
+            kIOHIDPrimaryUsagePageKey: NSNumber(value: 0x000C),
+            kIOHIDPrimaryUsageKey: NSNumber(value: 1)
+        ]
         let context = Unmanaged.passUnretained(self).toOpaque()
 
-        IOHIDManagerSetDeviceMatching(manager, matching as CFDictionary)
+        IOHIDManagerSetDeviceMatchingMultiple(
+            manager,
+            [customMatching as CFDictionary, nativeWakeMatching as CFDictionary] as CFArray
+        )
         IOHIDManagerRegisterDeviceMatchingCallback(manager, vibeKeyDeviceMatchingCallback, context)
         IOHIDManagerRegisterDeviceRemovalCallback(manager, vibeKeyDeviceRemovalCallback, context)
         IOHIDManagerScheduleWithRunLoop(
@@ -100,8 +175,11 @@ final class IOKitHardwareListener {
             CFRunLoopMode.commonModes.rawValue
         )
 
+        self.manager = manager
+        isRunning = true
         let result = IOHIDManagerOpen(manager, options)
         guard result == kIOReturnSuccess else {
+            isRunning = false
             IOHIDManagerRegisterDeviceMatchingCallback(manager, nil, nil)
             IOHIDManagerRegisterDeviceRemovalCallback(manager, nil, nil)
             IOHIDManagerUnscheduleFromRunLoop(
@@ -109,24 +187,29 @@ final class IOKitHardwareListener {
                 CFRunLoopGetMain(),
                 CFRunLoopMode.commonModes.rawValue
             )
+            self.manager = nil
             throw IOKitHardwareListenerError.managerOpenFailed(code: result)
         }
-
-        self.manager = manager
     }
 
     @discardableResult
     func stop() -> Error? {
+        isRunning = false
         let offlineError = leaveOnlineMode()
         guard let manager else {
             detachInputDevice()
+            detachWakeDevice()
             setConnected(false)
+            parkedForPowerSaving = false
+            wakeRequestDelivered = false
+            nativeWakeReportID = nil
             return offlineError
         }
 
         IOHIDManagerRegisterDeviceMatchingCallback(manager, nil, nil)
         IOHIDManagerRegisterDeviceRemovalCallback(manager, nil, nil)
         detachInputDevice()
+        detachWakeDevice()
         IOHIDManagerUnscheduleFromRunLoop(
             manager,
             CFRunLoopGetMain(),
@@ -134,6 +217,9 @@ final class IOKitHardwareListener {
         )
         IOHIDManagerClose(manager, IOOptionBits(kIOHIDOptionsTypeNone))
         self.manager = nil
+        parkedForPowerSaving = false
+        wakeRequestDelivered = false
+        nativeWakeReportID = nil
         setConnected(false)
         return offlineError
     }
@@ -146,6 +232,31 @@ final class IOKitHardwareListener {
     ) {
         guard result == kIOReturnSuccess, reportLength > 0 else { return }
         let bytes = Array(UnsafeBufferPointer(start: report, count: reportLength))
+
+        if let notice = VibeKeyDeviceNoticeParser.parse(reportID: reportID, report: bytes) {
+            logger.notice(
+                "AU05 notice: \(String(describing: notice), privacy: .public) powerSaving=\(self.parkedForPowerSaving, privacy: .public)"
+            )
+            deliverOnMain { [noticeHandler] in
+                noticeHandler(notice)
+            }
+            return
+        }
+
+        if let powerResponse = VibeKeyPowerResponseParser.parse(
+            reportID: reportID,
+            report: bytes
+        ) {
+            deliverOnMain { [powerResponseHandler] in
+                powerResponseHandler(powerResponse)
+            }
+            return
+        }
+
+        guard !parkedForPowerSaving else {
+            return
+        }
+
         guard let event = RawDeviceEventParser.parse(reportID: reportID, report: bytes),
               let event = deduplicated(event) else {
             return
@@ -159,6 +270,12 @@ final class IOKitHardwareListener {
     }
 
     fileprivate func deviceMatched(_ device: IOHIDDevice) {
+        guard isRunning else { return }
+        if primaryUsagePage(for: device) == 0x000C {
+            attachWakeDevice(device)
+            return
+        }
+
         guard inputDevice == nil else { return }
         attachInputDevice(device)
 
@@ -175,15 +292,27 @@ final class IOKitHardwareListener {
         }
 
         heartbeatFailureReported = false
+        parkedForPowerSaving = false
+        wakeRequestDelivered = false
+        nativeWakeReportID = nil
         onlineGeneration &+= 1
         startHeartbeat()
         setConnected(true)
+        refreshPowerStatus()
         logger.notice("AU05 software-online mode active")
     }
 
     fileprivate func deviceRemoved(_ device: IOHIDDevice) {
+        if let wakeDevice, CFEqual(wakeDevice, device) {
+            detachWakeDevice()
+            return
+        }
+
         guard let inputDevice, CFEqual(inputDevice, device) else { return }
         invalidateHeartbeatTimer()
+        parkedForPowerSaving = false
+        wakeRequestDelivered = false
+        nativeWakeReportID = nil
         detachInputDevice()
         deliverOnMain { [weak self] in
             guard let self else { return }
@@ -210,6 +339,24 @@ final class IOKitHardwareListener {
         inputReportCapacity = capacity
     }
 
+    private func attachWakeDevice(_ device: IOHIDDevice) {
+        guard wakeDevice == nil else { return }
+        let capacity = maxInputReportSize(for: device)
+        let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: capacity)
+        buffer.initialize(repeating: 0, count: capacity)
+        let context = Unmanaged.passUnretained(self).toOpaque()
+        IOHIDDeviceRegisterInputReportCallback(
+            device,
+            buffer,
+            capacity,
+            vibeKeyNativeWakeInputReportCallback,
+            context
+        )
+        wakeDevice = device
+        wakeReportBuffer = buffer
+        wakeReportCapacity = capacity
+    }
+
     private func detachInputDevice() {
         guard let device = inputDevice,
               let buffer = inputReportBuffer else {
@@ -229,6 +376,61 @@ final class IOKitHardwareListener {
         inputReportCapacity = 0
         pressedControls.removeAll(keepingCapacity: true)
         setConnected(false)
+    }
+
+    private func detachWakeDevice() {
+        guard let device = wakeDevice,
+              let buffer = wakeReportBuffer else {
+            wakeDevice = nil
+            wakeReportBuffer = nil
+            wakeReportCapacity = 0
+            return
+        }
+
+        let capacity = wakeReportCapacity
+        IOHIDDeviceRegisterInputReportCallback(device, buffer, capacity, nil, nil)
+        buffer.deinitialize(count: capacity)
+        buffer.deallocate()
+        wakeDevice = nil
+        wakeReportBuffer = nil
+        wakeReportCapacity = 0
+    }
+
+    fileprivate func receiveNativeWake(
+        result: IOReturn,
+        reportID: UInt32,
+        report: UnsafeMutablePointer<UInt8>,
+        reportLength: CFIndex
+    ) {
+        guard result == kIOReturnSuccess, reportLength > 0 else { return }
+        var bytes = Array(UnsafeBufferPointer(start: report, count: reportLength))
+        if reportID != 0, bytes.first == UInt8(truncatingIfNeeded: reportID) {
+            bytes.removeFirst()
+        }
+        guard parkedForPowerSaving, !wakeRequestDelivered else { return }
+
+        let isNeutral = !bytes.contains(where: { $0 != 0 })
+        if !isNeutral {
+            if nativeWakeReportID == nil {
+                nativeWakeReportID = reportID
+                logger.notice("Native wake press began id=\(reportID, privacy: .public)")
+            }
+            return
+        }
+
+        // Wait until the same native report becomes neutral. This lets the
+        // device finish the complete first shortcut, including key-up, before
+        // host-online mode suppresses native output again.
+        guard nativeWakeReportID == reportID else { return }
+        nativeWakeReportID = nil
+        logger.notice("Native wake press completed id=\(reportID, privacy: .public)")
+        requestWakeFromPowerSavingIfNeeded()
+    }
+
+    private func requestWakeFromPowerSavingIfNeeded() {
+        guard parkedForPowerSaving, !wakeRequestDelivered else { return }
+        wakeRequestDelivered = true
+        deliverOnMain { [powerSavingWakeHandler] in powerSavingWakeHandler() }
     }
 
     private func deduplicated(_ event: DeviceEvent) -> DeviceEvent? {
@@ -262,6 +464,26 @@ final class IOKitHardwareListener {
         heartbeatTimer = nil
         heartbeatInFlight = false
         onlineGeneration &+= 1
+    }
+
+    private func sendPowerQueriesAsynchronously() {
+        guard let device = inputDevice else { return }
+        let reports = VibeKeyPowerQuery.allCases.compactMap {
+            try? VibeKeyPacketCodec.powerQueryReport($0)
+        }
+        guard reports.count == VibeKeyPowerQuery.allCases.count else { return }
+
+        HIDOutputSerialQueue.queue.async { [logger] in
+            for report in reports {
+                let result = Self.write(report: report, to: device)
+                guard result == kIOReturnSuccess else {
+                    logger.error(
+                        "AU05 power query failed: \(String(format: "0x%08X", UInt32(bitPattern: result)), privacy: .public)"
+                    )
+                    return
+                }
+            }
+        }
     }
 
     private func enterOnlineModeSynchronously(on device: IOHIDDevice) -> Error? {
@@ -314,7 +536,6 @@ final class IOKitHardwareListener {
         }
 
         guard let device = inputDevice,
-              let onlineReport = try? VibeKeyPacketCodec.softwareOnlineReport(true),
               let heartbeatReport = try? VibeKeyPacketCodec.heartbeatReport(),
               !heartbeatInFlight else { return }
 
@@ -322,10 +543,7 @@ final class IOKitHardwareListener {
         let generation = onlineGeneration
 
         HIDOutputSerialQueue.queue.async { [weak self] in
-            let onlineResult = Self.write(report: onlineReport, to: device)
-            let result = onlineResult == kIOReturnSuccess
-                ? Self.write(report: heartbeatReport, to: device)
-                : onlineResult
+            let result = Self.write(report: heartbeatReport, to: device)
             DispatchQueue.main.async { [weak self] in
                 guard let self, generation == self.onlineGeneration else { return }
                 self.heartbeatInFlight = false
@@ -362,6 +580,17 @@ final class IOKitHardwareListener {
         var reportedSize: Int32 = 0
         CFNumberGetValue(unsafeBitCast(value, to: CFNumber.self), .sInt32Type, &reportedSize)
         return max(Int(reportedSize), VibeKeyPacketCodec.packetLength)
+    }
+
+    private func primaryUsagePage(for device: IOHIDDevice) -> Int {
+        guard let value = IOHIDDeviceGetProperty(device, kIOHIDPrimaryUsagePageKey as CFString),
+              CFGetTypeID(value) == CFNumberGetTypeID() else {
+            return -1
+        }
+
+        var usagePage: Int32 = -1
+        CFNumberGetValue(unsafeBitCast(value, to: CFNumber.self), .sInt32Type, &usagePage)
+        return Int(usagePage)
     }
 
     private func setConnected(_ newValue: Bool) {
@@ -429,6 +658,25 @@ private func vibeKeyInputReportCallback(
     guard let context else { return }
     let listener = Unmanaged<IOKitHardwareListener>.fromOpaque(context).takeUnretainedValue()
     listener.receive(
+        result: result,
+        reportID: reportID,
+        report: report,
+        reportLength: reportLength
+    )
+}
+
+private func vibeKeyNativeWakeInputReportCallback(
+    context: UnsafeMutableRawPointer?,
+    result: IOReturn,
+    sender: UnsafeMutableRawPointer?,
+    type: IOHIDReportType,
+    reportID: UInt32,
+    report: UnsafeMutablePointer<UInt8>,
+    reportLength: CFIndex
+) {
+    guard let context else { return }
+    let listener = Unmanaged<IOKitHardwareListener>.fromOpaque(context).takeUnretainedValue()
+    listener.receiveNativeWake(
         result: result,
         reportID: reportID,
         report: report,

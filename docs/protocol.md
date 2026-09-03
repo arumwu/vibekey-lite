@@ -305,6 +305,24 @@ SET: 01 06 20 04 <brightness> 00 ...
 
 Their existence is static-confirmed; applicability to AU05 is not.
 
+## Read-only power information
+
+VibeKey Lite reads these values for display and does not send the matching SET
+commands. The connected AU05 returned a battery level of 30%, 3688 mV, a
+300-second standby delay, and a 3600-second sleep/power-off delay.
+
+| Value | GET plaintext header | Successful response payload |
+| --- | --- | --- |
+| Battery | `01 01 02 01` | voltage `u16le` at 4, percent `u16le` at 6, charging byte at 10, flags at 11 |
+| Standby state | `01 01 0D 01` | Boolean at 4 |
+| Standby delay | `01 01 2C 01` | seconds as `u32le` at 4 |
+| Sleep / power-off delay | `01 01 42 01` | seconds as `u32le` at 4 |
+
+Responses use group byte `0x81`, command group `0x01`, the corresponding
+command ID, and status byte `0x11`. The low bit of the status byte denotes
+success. These layouts are static-confirmed and the values above are
+device-observed through read-only GET requests.
+
 ## Device hooks mode (`0x89`)
 
 ```text
@@ -358,9 +376,20 @@ AU05 tests established the behavior used by VibeKey Lite:
 
 The host-online control plaintext is `01 01 10 00 <state>`, where state `03`
 enables host processing and `00` disables it. The heartbeat plaintext is
-`06 01 23 00 01`. Vendor code resends online state 3 plus the heartbeat every
-1000 ms. VibeKey Lite uses a conservative 800 ms interval; normal stop sends
-state 0 synchronously before closing the HID interface.
+`06 01 23 00 01`. Vendor code contains a 1000 ms path that resends online
+state 3 plus the heartbeat. A host-online VibeKey Lite session was observed to
+keep the AU05 lights awake past its saved five-minute standby delay; static
+analysis alone cannot isolate which recurring report inhibits firmware idle.
+
+VibeKey Lite therefore tracks AU05 input activity. When the saved standby
+delay expires, it stops the heartbeat and sends online state 0 while keeping
+both HID interfaces open. Power-on and active notices update displayed state
+but deliberately do not resume host-online mode. The first native report is
+allowed to return to neutral so its complete stored shortcut, including key-up,
+finishes before host-online mode resumes. Subsequent inputs use host-side
+single/double/hold gestures.
+This handoff avoids modifying the saved standby and sleep timers. Normal stop
+also sends state 0 synchronously before closing the HID interfaces.
 
 While host-online mode is active, VibeKey Lite handles physical indices 0...5
 and sends the configured actions through macOS. Encoder single press is delayed

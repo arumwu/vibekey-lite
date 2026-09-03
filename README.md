@@ -10,6 +10,7 @@ VibeKey Lite 是 AU05／VibeKey 的輕量 macOS 選單列設定工具。它提�
 - 旋鈕單按保留原設定；雙按可另行設定（預設切組）；按住約 0.65 秒固定切組。
 - 可錄製實體鍵盤按鍵或最多四鍵的組合鍵。
 - 可分辨左／右 Option、Control、Shift、Command，並內建 F1–F12、Delete、Forward Delete、方向鍵、剪貼簿及媒體控制。
+- 介面直接顯示 AU05 電量、充電狀態、待機時間與自動關機時間；這些資料只讀取，不會擅自改寫。
 - 按「設為離線備用」會把目前完整六格寫進 AU05；App 正常結束後使用那一組。
 - 不包含或載入 Ulanzi 的程式庫，也不會連線到雲端。
 
@@ -23,6 +24,8 @@ AU05 韌體只會離線保存單按。為了同時分辨三種手勢，VibeKey L
 - 雙按使用「旋鈕雙按」那一格；預設是切換 AI／系統。
 - 長按達 0.65 秒後，放開時切換 AI／系統。
 - 正常結束、Mac 睡眠、Ulanzi Studio 開啟或線上傳輸失敗時，App 會明確退出線上模式，讓 AU05 回到原生六鍵。
+- 裝置閒置達它保存的待機時間後，App 會停止線上心跳並交還原生模式，讓 AU05 自行待機與關機。
+- 睡醒第一下使用離線備用的原生單按；App 偵測到該輸入後，後續單按、雙按與長按會自動恢復。
 - App 意外終止後的韌體逾時回復曾實際觀察成功；精確回復時間仍需依裝置韌體驗證。
 
 線上手勢需要 macOS 的「輸入監控」與「輔助使用」權限。權限不完整時不會啟用線上模式，AU05 仍直接執行原生六鍵。
@@ -86,6 +89,7 @@ VibeKey Lite is a lightweight macOS menu bar configurator for the AU05/VibeKey. 
 - Encoder single press keeps its configured action; double press has a separate configurable action (profile switching by default); a 0.65-second hold switches profiles.
 - Record a physical key or a chord of up to four keys.
 - Left/right Option, Control, Shift, and Command remain distinct. F1–F12, Delete, Forward Delete, navigation, editing, and supported media actions are included.
+- The UI shows battery, charging state, standby time, and automatic power-off time using read-only device queries.
 - **Set as Offline Backup** writes the current six single-press mappings to the AU05. After a normal app exit, the device uses that profile.
 - No vendor library, account, cloud connection, or third-party dependency.
 
@@ -99,6 +103,8 @@ The AU05 firmware stores only single-press actions offline. While VibeKey Lite r
 - A double press uses its own configurable row and switches profiles by default.
 - A 0.65-second hold switches profiles when released.
 - Normal quit, Mac sleep, vendor-app launch, or transport failure explicitly leaves online mode and restores native operation.
+- When the saved device standby delay elapses without AU05 input, the app stops host-online traffic and hands control back to native mode so firmware standby and power-off can run.
+- The first wake input completes the offline backup's native single-press action, including key release; the app then restores all subsequent single-, double-, and long-press gestures.
 - Firmware timeout recovery after an unexpected app stop has been observed once; exact recovery timing still depends on controlled device testing.
 
 Online gestures require both Input Monitoring and Accessibility permission. If either permission is unavailable, online mode is not enabled and the AU05 continues using its six native actions.
