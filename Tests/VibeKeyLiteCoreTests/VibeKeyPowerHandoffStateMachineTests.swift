@@ -45,6 +45,18 @@ final class VibeKeyPowerHandoffStateMachineTests: XCTestCase {
         XCTAssertNil(machine.handoffDeadline)
     }
 
+    func testReadingTheSameStandbyDelayDoesNotPostponeHandoff() {
+        var machine = VibeKeyPowerHandoffStateMachine(idleInterval: 300)
+        _ = machine.onlineStarted(at: 10)
+
+        XCTAssertEqual(machine.updateIdleInterval(300, at: 200), [])
+        XCTAssertEqual(machine.handoffDeadline, 310)
+        XCTAssertEqual(
+            machine.standbyHandoffDeadlineReached(at: 310),
+            [.handoffForStandby]
+        )
+    }
+
     func testCurrentDeadlineHandsOffOnlyOnce() {
         var machine = VibeKeyPowerHandoffStateMachine(idleInterval: 300)
         _ = machine.onlineStarted(at: 10)

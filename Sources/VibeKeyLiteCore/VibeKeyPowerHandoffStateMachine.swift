@@ -50,7 +50,11 @@ public struct VibeKeyPowerHandoffStateMachine: Equatable, Sendable {
         _ interval: TimeInterval,
         at timestamp: TimeInterval
     ) -> [VibeKeyPowerHandoffDecision] {
-        idleInterval = interval.isFinite && interval > 0 ? interval : 0
+        let normalizedInterval = interval.isFinite && interval > 0 ? interval : 0
+        // Re-reading an unchanged device setting is not physical activity and
+        // must not postpone the existing inactivity deadline.
+        guard normalizedInterval != idleInterval else { return [] }
+        idleInterval = normalizedInterval
         guard mode == .online else { return [] }
         if idleInterval == 0 {
             let hadScheduledHandoff = handoffDeadline != nil
