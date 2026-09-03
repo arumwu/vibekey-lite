@@ -345,19 +345,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func resumeEnhancedModeIfSafe() {
         guard !listenerActive,
+              enhancedModeRequested,
               !hardwareSyncInProgress,
               !needsHardwareSync else { return }
         startHardwareListener(promptForPermission: false)
     }
 
     private func resumeAfterUserActivityIfNeeded() {
-        if powerSaving {
-            applyPowerHandoffDecisions(
-                powerHandoffStateMachine.wakeInputReceived()
-            )
-        } else {
-            resumeEnhancedModeIfSafe()
-        }
+        // Opening the menu is not AU05 activity. While native power saving is
+        // active, only a completed physical AU05 input should restore online
+        // gestures; otherwise merely checking battery status wakes its lights.
+        guard !powerSaving else { return }
+        resumeEnhancedModeIfSafe()
     }
 
     private func applyPowerHandoffDecisions(
