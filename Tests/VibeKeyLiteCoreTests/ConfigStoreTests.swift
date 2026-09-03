@@ -29,9 +29,11 @@ final class ConfigStoreTests: XCTestCase {
 
         XCTAssertTrue(FileManager.default.fileExists(atPath: configURL.path))
         XCTAssertEqual(configuration.activeProfile, .a)
-        XCTAssertEqual(configuration[.a][.knobLeft], .downArrow)
-        XCTAssertEqual(configuration[.a][.knobPress], .none)
-        XCTAssertEqual(configuration[.b][.knobRight], .volumeUp)
+        XCTAssertNil(configuration.offlineProfile)
+        XCTAssertEqual(configuration[.a][.knobLeft], .preset(.downArrow))
+        XCTAssertEqual(configuration[.a][.knobPress], .preset(.selectAll))
+        XCTAssertEqual(configuration[.a][.knobDoublePress], .preset(.switchProfile))
+        XCTAssertEqual(configuration[.b][.knobRight], .preset(.volumeUp))
 
         let json = try JSONSerialization.jsonObject(with: Data(contentsOf: configURL))
         let dictionary = try XCTUnwrap(json as? [String: Any])
@@ -42,20 +44,38 @@ final class ConfigStoreTests: XCTestCase {
     func testDefaultProfilesMatchAIAndSystemLayout() {
         let configuration = AppConfiguration.default
 
-        XCTAssertEqual(configuration[.a][.knobLeft], .downArrow)
-        XCTAssertEqual(configuration[.a][.knobRight], .upArrow)
-        XCTAssertEqual(configuration[.a][.topButton], .optionKey)
-        XCTAssertEqual(configuration[.a][.middleButton], .returnKey)
-        XCTAssertEqual(configuration[.a][.bottomButton], .tab)
+        XCTAssertEqual(configuration[.a][.knobLeft], .preset(.downArrow))
+        XCTAssertEqual(configuration[.a][.knobPress], .preset(.selectAll))
+        XCTAssertEqual(configuration[.a][.knobDoublePress], .preset(.switchProfile))
+        XCTAssertEqual(configuration[.a][.knobRight], .preset(.upArrow))
+        XCTAssertEqual(configuration[.a][.topButton], .preset(.optionKey))
+        XCTAssertEqual(configuration[.a][.middleButton], .preset(.returnKey))
+        XCTAssertEqual(configuration[.a][.bottomButton], .preset(.tab))
+        XCTAssertTrue(configuration.needsHardwareSync)
+        XCTAssertNil(configuration.offlineProfile)
 
-        XCTAssertEqual(configuration[.b][.knobLeft], .volumeDown)
-        XCTAssertEqual(configuration[.b][.knobPress], .none)
-        XCTAssertEqual(configuration[.b][.knobRight], .volumeUp)
-        XCTAssertEqual(configuration[.b][.topButton], .playPause)
-        XCTAssertEqual(configuration[.b][.middleButton], .mute)
-        XCTAssertEqual(configuration[.b][.bottomButton], .appSwitcher)
+        XCTAssertEqual(configuration[.b][.knobLeft], .preset(.volumeDown))
+        XCTAssertEqual(configuration[.b][.knobPress], .preset(.appSwitcher))
+        XCTAssertEqual(configuration[.b][.knobDoublePress], .preset(.switchProfile))
+        XCTAssertEqual(configuration[.b][.knobRight], .preset(.volumeUp))
+        XCTAssertEqual(configuration[.b][.topButton], .preset(.playPause))
+        XCTAssertEqual(configuration[.b][.middleButton], .preset(.mute))
+        XCTAssertEqual(configuration[.b][.bottomButton], .preset(.appSwitcher))
         XCTAssertEqual(ProfileID.a.displayName, "AI")
         XCTAssertEqual(ProfileID.b.displayName, "系統")
+    }
+
+    func testRestoresLegacyReservedKnobInBothProfiles() {
+        var configuration = AppConfiguration.default
+        configuration.profileA[.knobPress] = .preset(.switchProfile)
+        configuration.profileB[.knobPress] = .preset(.switchProfile)
+        configuration.offlineProfile = .b
+
+        XCTAssertTrue(configuration.restoreLegacyReservedKnobMappings())
+        XCTAssertEqual(configuration.profileA[.knobPress], .preset(.selectAll))
+        XCTAssertEqual(configuration.profileB[.knobPress], .preset(.appSwitcher))
+        XCTAssertNil(configuration.offlineProfile)
+        XCTAssertFalse(configuration.restoreLegacyReservedKnobMappings())
     }
 
     func testRoundTripsCustomizedProfiles() throws {
@@ -63,8 +83,11 @@ final class ConfigStoreTests: XCTestCase {
         let store = ConfigStore(configURL: configURL)
         var expected = AppConfiguration.default
         expected.activeProfile = .b
+        var profileA = expected[.a]
         var profileB = expected[.b]
-        profileB[.middleButton] = .selectAll
+        profileA[.topButton] = .preset(.f1)
+        profileB[.middleButton] = .preset(.f12)
+        expected[.a] = profileA
         expected[.b] = profileB
 
         try store.save(expected)
@@ -83,9 +106,59 @@ final class ConfigStoreTests: XCTestCase {
         """
         let decoded = try JSONDecoder().decode(AppConfiguration.self, from: Data(json.utf8))
 
-        XCTAssertEqual(decoded[.a][.knobLeft], .leftArrow)
-        XCTAssertEqual(decoded[.a][.knobRight], .none)
-        XCTAssertEqual(decoded[.b][.topButton], .none)
+        XCTAssertEqual(decoded[.a][.knobLeft], .preset(.leftArrow))
+        XCTAssertEqual(decoded[.a][.knobRight], .preset(.none))
+        XCTAssertEqual(decoded[.a][.knobDoublePress], .preset(.switchProfile))
+        XCTAssertEqual(decoded[.b][.topButton], .preset(.none))
+        XCTAssertTrue(decoded.needsHardwareSync)
+    }
+
+    func testCompletedNativeProfileSyncRoundTrips() throws {
+        let configURL = temporaryDirectory.appendingPathComponent("config.json")
+        let store = ConfigStore(configURL: configURL)
+        var expected = AppConfiguration.default
+        expected.needsHardwareSync = false
+        expected.offlineProfile = .a
+
+        try store.save(expected)
+
+        XCTAssertFalse(try store.loadOrCreate().needsHardwareSync)
+        XCTAssertEqual(try store.loadOrCreate().offlineProfile, .a)
+    }
+
+    func testMissingOfflineProfileForcesHardwareSync() throws {
+        let json = """
+        {
+          "activeProfile": "b",
+          "profileA": {},
+          "profileB": {},
+          "needsHardwareSync": false
+        }
+        """
+
+        let decoded = try JSONDecoder().decode(
+            AppConfiguration.self,
+            from: Data(json.utf8)
+        )
+
+        XCTAssertNil(decoded.offlineProfile)
+        XCTAssertTrue(decoded.needsHardwareSync)
+    }
+
+    func testRoundTripsRecordedNativeShortcut() throws {
+        let shortcut = try NativeShortcut(
+            entries: [.init(pageAndSign: 0x03, value: 0x04)],
+            displayName: "左 Option"
+        )
+        var expected = AppConfiguration.default
+        var profileA = expected[.a]
+        profileA[.topButton] = .shortcut(shortcut)
+        expected[.a] = profileA
+
+        let encoded = try JSONEncoder().encode(expected)
+        let decoded = try JSONDecoder().decode(AppConfiguration.self, from: encoded)
+
+        XCTAssertEqual(decoded, expected)
     }
 
     func testInvalidJSONIsNotOverwritten() throws {

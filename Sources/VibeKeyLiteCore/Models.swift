@@ -18,6 +18,7 @@ public enum ProfileID: String, CaseIterable, Codable, Sendable {
 
 public enum InputControl: String, CaseIterable, Codable, CodingKey, Sendable {
     case knobPress
+    case knobDoublePress
     case knobLeft
     case knobRight
     case topButton
@@ -26,7 +27,8 @@ public enum InputControl: String, CaseIterable, Codable, CodingKey, Sendable {
 
     public var displayName: String {
         switch self {
-        case .knobPress: "旋鈕短按"
+        case .knobPress: "旋鈕單按"
+        case .knobDoublePress: "旋鈕雙按"
         case .knobLeft: "旋鈕向左"
         case .knobRight: "旋鈕向右"
         case .topButton: "上鍵"
@@ -35,16 +37,19 @@ public enum InputControl: String, CaseIterable, Codable, CodingKey, Sendable {
         }
     }
 
-    public var sourceFunctionKey: String {
-        switch self {
-        case .knobPress: "F13"
-        case .knobLeft: "F14"
-        case .knobRight: "F15"
-        case .topButton: "F16"
-        case .middleButton: "F17"
-        case .bottomButton: "F18"
-        }
+    public var isNativeHardwareControl: Bool {
+        self != .knobDoublePress
     }
+
+}
+
+public enum KeyPhase: Equatable, Sendable {
+    case down
+    case up
+}
+
+public enum DeviceEvent: Equatable, Sendable {
+    case key(control: InputControl, phase: KeyPhase)
 }
 
 public enum KeyAction: String, CaseIterable, Codable, Sendable {
@@ -54,6 +59,7 @@ public enum KeyAction: String, CaseIterable, Codable, Sendable {
     case escape
     case tab
     case optionKey
+    case rightOptionKey
     case leftArrow
     case rightArrow
     case upArrow
@@ -64,6 +70,18 @@ public enum KeyAction: String, CaseIterable, Codable, Sendable {
     case end
     case pageUp
     case pageDown
+    case f1
+    case f2
+    case f3
+    case f4
+    case f5
+    case f6
+    case f7
+    case f8
+    case f9
+    case f10
+    case f11
+    case f12
     case selectAll
     case copy
     case paste
@@ -92,7 +110,8 @@ public enum KeyAction: String, CaseIterable, Codable, Sendable {
         case .returnKey: "Return"
         case .escape: "Escape"
         case .tab: "Tab"
-        case .optionKey: "Option"
+        case .optionKey: "左 Option"
+        case .rightOptionKey: "右 Option"
         case .leftArrow: "方向鍵 ←"
         case .rightArrow: "方向鍵 →"
         case .upArrow: "方向鍵 ↑"
@@ -103,6 +122,18 @@ public enum KeyAction: String, CaseIterable, Codable, Sendable {
         case .end: "End"
         case .pageUp: "Page Up"
         case .pageDown: "Page Down"
+        case .f1: "F1"
+        case .f2: "F2"
+        case .f3: "F3"
+        case .f4: "F4"
+        case .f5: "F5"
+        case .f6: "F6"
+        case .f7: "F7"
+        case .f8: "F8"
+        case .f9: "F9"
+        case .f10: "F10"
+        case .f11: "F11"
+        case .f12: "F12"
         case .selectAll: "⌘A（全選）"
         case .copy: "⌘C（複製）"
         case .paste: "⌘V（貼上）"
@@ -128,11 +159,14 @@ public enum KeyAction: String, CaseIterable, Codable, Sendable {
 
     public var category: KeyActionCategory {
         switch self {
-        case .none, .space, .returnKey, .escape, .tab, .optionKey:
+        case .none, .space, .returnKey, .escape, .tab, .optionKey, .rightOptionKey:
             .basic
         case .leftArrow, .rightArrow, .upArrow, .downArrow,
              .deleteBackward, .deleteForward, .home, .end, .pageUp, .pageDown:
             .navigation
+        case .f1, .f2, .f3, .f4, .f5, .f6,
+             .f7, .f8, .f9, .f10, .f11, .f12:
+            .functionKeys
         case .selectAll, .copy, .paste, .cut, .undo, .redo, .save:
             .editing
         case .appSwitcher, .spotlight, .screenshot, .missionControl, .switchProfile:
@@ -147,29 +181,83 @@ public enum KeyAction: String, CaseIterable, Codable, Sendable {
 public enum KeyActionCategory: String, CaseIterable, Sendable {
     case basic = "基本"
     case navigation = "導航"
+    case functionKeys = "F1–F12"
     case editing = "編輯"
     case system = "系統"
     case media = "媒體"
 }
 
-public struct ProfileConfiguration: Codable, Equatable, Sendable {
-    private var mappings: [InputControl: KeyAction]
+public enum ControlBinding: Codable, Equatable, Sendable {
+    case preset(KeyAction)
+    case shortcut(NativeShortcut)
 
-    public init(mappings: [InputControl: KeyAction] = [:]) {
+    private enum CodingKeys: String, CodingKey {
+        case type
+        case shortcut
+    }
+
+    private enum Kind: String, Codable {
+        case shortcut
+    }
+
+    public init(from decoder: Decoder) throws {
+        if let action = try? decoder.singleValueContainer().decode(KeyAction.self) {
+            self = .preset(action)
+            return
+        }
+
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let kind = try container.decode(Kind.self, forKey: .type)
+        switch kind {
+        case .shortcut:
+            self = .shortcut(try container.decode(NativeShortcut.self, forKey: .shortcut))
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        switch self {
+        case let .preset(action):
+            var container = encoder.singleValueContainer()
+            try container.encode(action)
+        case let .shortcut(shortcut):
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(Kind.shortcut, forKey: .type)
+            try container.encode(shortcut, forKey: .shortcut)
+        }
+    }
+
+    public var displayName: String {
+        switch self {
+        case let .preset(action): action.displayName
+        case let .shortcut(shortcut): shortcut.displayName
+        }
+    }
+}
+
+public struct ProfileConfiguration: Codable, Equatable, Sendable {
+    private var mappings: [InputControl: ControlBinding]
+
+    public init(mappings: [InputControl: ControlBinding] = [:]) {
         self.mappings = mappings
     }
 
-    public subscript(control: InputControl) -> KeyAction {
-        get { mappings[control] ?? .none }
+    public subscript(control: InputControl) -> ControlBinding {
+        get { mappings[control] ?? .preset(.none) }
         set { mappings[control] = newValue }
     }
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: InputControl.self)
-        var decoded: [InputControl: KeyAction] = [:]
+        var decoded: [InputControl: ControlBinding] = [:]
 
         for control in InputControl.allCases {
-            decoded[control] = try container.decodeIfPresent(KeyAction.self, forKey: control) ?? KeyAction.none
+            let fallback: ControlBinding = control == .knobDoublePress
+                ? .preset(.switchProfile)
+                : .preset(.none)
+            decoded[control] = try container.decodeIfPresent(
+                ControlBinding.self,
+                forKey: control
+            ) ?? fallback
         }
 
         mappings = decoded
@@ -186,17 +274,57 @@ public struct ProfileConfiguration: Codable, Equatable, Sendable {
 
 public struct AppConfiguration: Codable, Equatable, Sendable {
     public var activeProfile: ProfileID
+    public var offlineProfile: ProfileID?
     public var profileA: ProfileConfiguration
     public var profileB: ProfileConfiguration
+    public var needsHardwareSync: Bool
 
     public init(
         activeProfile: ProfileID = .a,
+        offlineProfile: ProfileID? = nil,
         profileA: ProfileConfiguration = .init(),
-        profileB: ProfileConfiguration = .init()
+        profileB: ProfileConfiguration = .init(),
+        needsHardwareSync: Bool = true
     ) {
         self.activeProfile = activeProfile
+        self.offlineProfile = offlineProfile
         self.profileA = profileA
         self.profileB = profileB
+        self.needsHardwareSync = needsHardwareSync
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case activeProfile
+        case offlineProfile
+        case profileA
+        case profileB
+        case needsHardwareSync
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        activeProfile = try container.decode(ProfileID.self, forKey: .activeProfile)
+        offlineProfile = try container.decodeIfPresent(ProfileID.self, forKey: .offlineProfile)
+        profileA = try container.decode(ProfileConfiguration.self, forKey: .profileA)
+        profileB = try container.decode(ProfileConfiguration.self, forKey: .profileB)
+        // Configurations written before this marker existed must complete one
+        // full native six-slot write before online gestures may start safely.
+        let decodedNeedsHardwareSync = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .needsHardwareSync
+        ) ?? true
+        // An offline profile is proof that a complete six-slot native backup
+        // finished. Never trust an old/partial "false" marker without it.
+        needsHardwareSync = offlineProfile == nil ? true : decodedNeedsHardwareSync
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(activeProfile, forKey: .activeProfile)
+        try container.encodeIfPresent(offlineProfile, forKey: .offlineProfile)
+        try container.encode(profileA, forKey: .profileA)
+        try container.encode(profileB, forKey: .profileB)
+        try container.encode(needsHardwareSync, forKey: .needsHardwareSync)
     }
 
     public subscript(profile: ProfileID) -> ProfileConfiguration {
@@ -216,20 +344,22 @@ public struct AppConfiguration: Codable, Equatable, Sendable {
 
     public static var `default`: AppConfiguration {
         var profileA = ProfileConfiguration()
-        profileA[.knobPress] = .none
-        profileA[.knobLeft] = .downArrow
-        profileA[.knobRight] = .upArrow
-        profileA[.topButton] = .optionKey
-        profileA[.middleButton] = .returnKey
-        profileA[.bottomButton] = .tab
+        profileA[.knobPress] = .preset(.selectAll)
+        profileA[.knobDoublePress] = .preset(.switchProfile)
+        profileA[.knobLeft] = .preset(.downArrow)
+        profileA[.knobRight] = .preset(.upArrow)
+        profileA[.topButton] = .preset(.optionKey)
+        profileA[.middleButton] = .preset(.returnKey)
+        profileA[.bottomButton] = .preset(.tab)
 
         var profileB = ProfileConfiguration()
-        profileB[.knobPress] = .none
-        profileB[.knobLeft] = .volumeDown
-        profileB[.knobRight] = .volumeUp
-        profileB[.topButton] = .playPause
-        profileB[.middleButton] = .mute
-        profileB[.bottomButton] = .appSwitcher
+        profileB[.knobPress] = .preset(.appSwitcher)
+        profileB[.knobDoublePress] = .preset(.switchProfile)
+        profileB[.knobLeft] = .preset(.volumeDown)
+        profileB[.knobRight] = .preset(.volumeUp)
+        profileB[.topButton] = .preset(.playPause)
+        profileB[.middleButton] = .preset(.mute)
+        profileB[.bottomButton] = .preset(.appSwitcher)
 
         return AppConfiguration(
             activeProfile: .a,
@@ -237,78 +367,27 @@ public struct AppConfiguration: Codable, Equatable, Sendable {
             profileB: profileB
         )
     }
-}
 
-public struct KeyModifiers: OptionSet, Equatable, Sendable {
-    public let rawValue: Int
+    /// Version 0.3 briefly reserved the knob as F18. Restore the last known
+    /// pre-migration defaults so upgrading never leaves the sixth native slot dead.
+    @discardableResult
+    public mutating func restoreLegacyReservedKnobMappings() -> Bool {
+        let legacyBinding = ControlBinding.preset(KeyAction.switchProfile)
+        var changed = false
 
-    public init(rawValue: Int) {
-        self.rawValue = rawValue
-    }
-
-    public static let command = KeyModifiers(rawValue: 1 << 0)
-    public static let shift = KeyModifiers(rawValue: 1 << 1)
-    public static let control = KeyModifiers(rawValue: 1 << 2)
-    public static let option = KeyModifiers(rawValue: 1 << 3)
-}
-
-public enum MediaAction: Equatable, Sendable {
-    case volumeUp
-    case volumeDown
-    case mute
-    case brightnessUp
-    case brightnessDown
-    case previousTrack
-    case nextTrack
-    case playPause
-}
-
-public enum ResolvedAction: Equatable, Sendable {
-    case none
-    case keyStroke(keyCode: UInt16, modifiers: KeyModifiers)
-    case media(MediaAction)
-    case switchProfile
-}
-
-public enum ActionResolver {
-    public static func resolve(_ action: KeyAction) -> ResolvedAction {
-        switch action {
-        case .none: .none
-        case .space: .keyStroke(keyCode: 49, modifiers: [])
-        case .returnKey: .keyStroke(keyCode: 36, modifiers: [])
-        case .escape: .keyStroke(keyCode: 53, modifiers: [])
-        case .tab: .keyStroke(keyCode: 48, modifiers: [])
-        case .optionKey: .keyStroke(keyCode: 58, modifiers: [])
-        case .leftArrow: .keyStroke(keyCode: 123, modifiers: [])
-        case .rightArrow: .keyStroke(keyCode: 124, modifiers: [])
-        case .downArrow: .keyStroke(keyCode: 125, modifiers: [])
-        case .upArrow: .keyStroke(keyCode: 126, modifiers: [])
-        case .deleteBackward: .keyStroke(keyCode: 51, modifiers: [])
-        case .deleteForward: .keyStroke(keyCode: 117, modifiers: [])
-        case .home: .keyStroke(keyCode: 115, modifiers: [])
-        case .end: .keyStroke(keyCode: 119, modifiers: [])
-        case .pageUp: .keyStroke(keyCode: 116, modifiers: [])
-        case .pageDown: .keyStroke(keyCode: 121, modifiers: [])
-        case .selectAll: .keyStroke(keyCode: 0, modifiers: .command)
-        case .copy: .keyStroke(keyCode: 8, modifiers: .command)
-        case .paste: .keyStroke(keyCode: 9, modifiers: .command)
-        case .cut: .keyStroke(keyCode: 7, modifiers: .command)
-        case .undo: .keyStroke(keyCode: 6, modifiers: .command)
-        case .redo: .keyStroke(keyCode: 6, modifiers: [.command, .shift])
-        case .save: .keyStroke(keyCode: 1, modifiers: .command)
-        case .appSwitcher: .keyStroke(keyCode: 48, modifiers: .command)
-        case .spotlight: .keyStroke(keyCode: 49, modifiers: .command)
-        case .screenshot: .keyStroke(keyCode: 23, modifiers: [.command, .shift])
-        case .missionControl: .keyStroke(keyCode: 126, modifiers: .control)
-        case .switchProfile: .switchProfile
-        case .volumeUp: .media(.volumeUp)
-        case .volumeDown: .media(.volumeDown)
-        case .mute: .media(.mute)
-        case .brightnessUp: .media(.brightnessUp)
-        case .brightnessDown: .media(.brightnessDown)
-        case .previousTrack: .media(.previousTrack)
-        case .nextTrack: .media(.nextTrack)
-        case .playPause: .media(.playPause)
+        if profileA[.knobPress] == legacyBinding {
+            profileA[.knobPress] = .preset(.selectAll)
+            changed = true
         }
+        if profileB[.knobPress] == legacyBinding {
+            profileB[.knobPress] = .preset(.appSwitcher)
+            changed = true
+        }
+
+        if changed {
+            offlineProfile = nil
+        }
+
+        return changed
     }
 }

@@ -16,6 +16,10 @@ enum IOHIDListenAccessError: LocalizedError {
 }
 
 enum IOHIDListenAccess {
+    static var isGranted: Bool {
+        IOHIDCheckAccess(kIOHIDRequestTypeListenEvent) == kIOHIDAccessTypeGranted
+    }
+
     static func ensure(promptForPermission: Bool) throws {
         let requestType = kIOHIDRequestTypeListenEvent
         switch IOHIDCheckAccess(requestType) {

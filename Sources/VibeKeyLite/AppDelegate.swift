@@ -10,9 +10,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var popover: NSPopover?
     private var settingsViewController: SettingsViewController?
     private var hardwareListener: IOKitHardwareListener?
+    private var workspaceObservers: [NSObjectProtocol] = []
     private let actionPerformer = ActionPerformer()
     private var knobPressStateMachine = KnobPressStateMachine()
-    private var knobPressTimer: Timer?
+    private var knobLongPressTimer: Timer?
+    private var knobSinglePressTimer: Timer?
     private let logger = Logger(
         subsystem: "io.github.arumwu.VibeKeyLite",
         category: "HID"
@@ -22,6 +24,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var accessibilityGranted = false
     private var deviceConnected = false
     private var hardwareSyncInProgress = false
+    private var vendorInterferedDuringHardwareSync = false
+    private var needsHardwareSync = false
+    private var configurationReady = false
+    private var enhancedModeRequested = true
+    private var offlineStateUnconfirmed = false
     private var notice: String?
 
     override init() {
@@ -38,12 +45,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         loadConfiguration()
         configureStatusItemAndPopover()
         configureHardwareListener()
+        configureLifecycleObservers()
         refreshUI()
+
+        if needsHardwareSync {
+            notice = "請按「離線備用」確認寫回完整六鍵；確認前不會改動 AU05。"
+            refreshUI()
+        } else {
+            startHardwareListener(promptForPermission: true)
+        }
+
+        if ProcessInfo.processInfo.environment["VIBEKEY_SHOW_SETTINGS"] == "1" {
+            DispatchQueue.main.async { [weak self] in
+                self?.showPopover()
+            }
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        knobPressTimer?.invalidate()
-        hardwareListener?.stop()
+        let notificationCenter = NSWorkspace.shared.notificationCenter
+        workspaceObservers.forEach(notificationCenter.removeObserver)
+        workspaceObservers.removeAll()
+        resetKnobPressState()
+        actionPerformer.releaseAll()
+        if let error = hardwareListener?.stop() {
+            logger.error("Offline shutdown failed: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard hardwareSyncInProgress else { return .terminateNow }
+        notice = "AU05 寫入中；完成後再結束 App。"
+        refreshUI()
+        return .terminateCancel
     }
 
     private func loadConfiguration() {
@@ -51,8 +85,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let url = try ConfigStore.defaultConfigURL()
             let store = ConfigStore(configURL: url)
             configuration = try store.loadOrCreate()
+            let migratedKnob = configuration.restoreLegacyReservedKnobMappings()
+            let needsInitialNativeBackup = configuration.offlineProfile == nil
+            if migratedKnob || needsInitialNativeBackup {
+                configuration.needsHardwareSync = true
+                try store.save(configuration)
+            }
+            needsHardwareSync = configuration.needsHardwareSync
             configStore = store
+            configurationReady = true
         } catch {
+            configurationReady = false
             notice = "設定檔讀取失敗：\(error.localizedDescription)"
         }
     }
@@ -66,16 +109,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let settings = SettingsViewController(configuration: configuration)
         settings.onProfileSelected = { [weak self] profile in
             guard let self else { return }
+            guard !self.hardwareSyncInProgress else {
+                self.refreshUI()
+                return
+            }
+            guard profile != self.configuration.activeProfile else { return }
+            let previousConfiguration = self.configuration
+            self.cancelPendingInput()
             self.configuration.activeProfile = profile
-            self.persistConfiguration()
+            guard self.persistConfiguration() else {
+                self.configuration = previousConfiguration
+                self.refreshUI()
+                return
+            }
+            self.notice = "已切換到「\(profile.displayName)」；離線備用未更動。"
             self.refreshUI()
         }
-        settings.onMappingChanged = { [weak self] profile, control, action in
+        settings.onMappingChanged = { [weak self] profile, control, binding in
             guard let self else { return }
+            guard !self.hardwareSyncInProgress else {
+                self.refreshUI()
+                return
+            }
+            let previousConfiguration = self.configuration
             var profileConfiguration = self.configuration[profile]
-            profileConfiguration[control] = action
+            profileConfiguration[control] = binding
             self.configuration[profile] = profileConfiguration
-            self.persistConfiguration()
+            guard self.persistConfiguration() else {
+                self.configuration = previousConfiguration
+                self.refreshUI()
+                return
+            }
+            self.notice = control.isNativeHardwareControl
+                ? "設定已保存；按「設為離線備用」才會寫入 AU05。"
+                : "雙按設定已保存。"
             self.refreshUI()
         }
         settings.onRestartApplication = { [weak self] in
@@ -83,6 +150,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         settings.onSyncHardware = { [weak self] in
             self?.confirmAndSyncHardware()
+        }
+        settings.onToggleEnhancedMode = { [weak self] in
+            self?.toggleEnhancedMode()
         }
         settings.onQuit = {
             NSApplication.shared.terminate(nil)
@@ -110,15 +180,135 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
                 self.refreshUI()
             },
+            failureHandler: { [weak self] error in
+                guard let self else { return }
+                let stopError = self.suspendEnhancedMode()
+                self.notice = (stopError ?? error).localizedDescription
+                self.refreshUI()
+            },
             deviceRemovalHandler: { [weak self] in
                 self?.handleDeviceRemoval()
+            },
+            shouldRemainOnline: { [weak self] in
+                guard let self else { return false }
+                return self.onlinePreflightIsValid
             }
         )
         hardwareListener = listener
-        startHardwareListener(promptForPermission: true)
+    }
+
+    private func configureLifecycleObservers() {
+        let center = NSWorkspace.shared.notificationCenter
+
+        workspaceObservers.append(center.addObserver(
+            forName: NSWorkspace.willSleepNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.stopEnhancedMode(
+                notice: "Mac 即將睡眠；AU05 已退回裝置原生按鍵。"
+            )
+        })
+
+        workspaceObservers.append(center.addObserver(
+            forName: NSWorkspace.didWakeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.resumeEnhancedModeIfSafe()
+        })
+
+        workspaceObservers.append(center.addObserver(
+            forName: NSWorkspace.didLaunchApplicationNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            guard Self.isVendorApplication(notification) else { return }
+            if self?.hardwareSyncInProgress == true {
+                self?.vendorInterferedDuringHardwareSync = true
+            }
+            self?.stopEnhancedMode(
+                notice: "Ulanzi Studio 已開啟；AU05 已退回裝置原生按鍵。"
+            )
+        })
+
+        workspaceObservers.append(center.addObserver(
+            forName: NSWorkspace.didTerminateApplicationNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            guard Self.isVendorApplication(notification) else { return }
+            self?.resumeEnhancedModeIfSafe()
+        })
+    }
+
+    private static func isVendorApplication(_ notification: Notification) -> Bool {
+        let application = notification.userInfo?[NSWorkspace.applicationUserInfoKey]
+            as? NSRunningApplication
+        return application?.bundleIdentifier == "ulanzi.UlanziStudio"
+    }
+
+    private func stopEnhancedMode(notice: String) {
+        let offlineError = suspendEnhancedMode()
+        self.notice = offlineError?.localizedDescription ?? notice
+        refreshUI()
+    }
+
+    private func suspendEnhancedMode() -> Error? {
+        cancelPendingInput()
+        let hadAttachedDevice = hardwareListener?.hasAttachedDevice == true
+        let offlineError = hardwareListener?.stop()
+        if offlineError != nil {
+            offlineStateUnconfirmed = true
+        } else if hadAttachedDevice {
+            offlineStateUnconfirmed = false
+        }
+        listenerActive = false
+        deviceConnected = false
+        return offlineError
+    }
+
+    private func toggleEnhancedMode() {
+        if listenerActive {
+            enhancedModeRequested = false
+            stopEnhancedMode(notice: "已切回 AU05 原生六鍵。")
+            return
+        }
+
+        enhancedModeRequested = true
+        if needsHardwareSync {
+            notice = "請先按「離線備用」確認完整六鍵；不會自動改寫 AU05。"
+            refreshUI()
+        } else {
+            startHardwareListener(promptForPermission: true)
+        }
+    }
+
+    private func resumeEnhancedModeIfSafe() {
+        guard !listenerActive,
+              !hardwareSyncInProgress,
+              !needsHardwareSync else { return }
+        startHardwareListener(promptForPermission: false)
     }
 
     private func restartApplication() {
+        guard !hardwareSyncInProgress else {
+            notice = "AU05 寫入中；完成後再重啟 App。"
+            refreshUI()
+            return
+        }
+
+        if let error = suspendEnhancedMode() {
+            notice = "尚未重啟：\(error.localizedDescription)"
+            refreshUI()
+            return
+        }
+        guard !offlineStateUnconfirmed else {
+            notice = "尚未確認 AU05 已回原生模式；請先完成一次「離線備用」，再重啟。"
+            refreshUI()
+            return
+        }
+
         let configuration = NSWorkspace.OpenConfiguration()
         configuration.createsNewApplicationInstance = true
         NSWorkspace.shared.openApplication(
@@ -128,6 +318,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             DispatchQueue.main.async {
                 if let error {
                     self?.notice = "重新啟動失敗：\(error.localizedDescription)"
+                    self?.resumeEnhancedModeIfSafe()
                     self?.refreshUI()
                     return
                 }
@@ -137,21 +328,52 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func startHardwareListener(promptForPermission: Bool) {
-        resetKnobPressState()
+        cancelPendingInput()
+
+        guard enhancedModeRequested else { return }
+
+        guard configurationReady else {
+            listenerActive = false
+            deviceConnected = false
+            notice = "設定檔無法使用；AU05 保持裝置原生模式。"
+            refreshUI()
+            return
+        }
+
         accessibilityGranted = AccessibilityAccess.isTrusted(
             promptForPermission: promptForPermission
         )
+        guard accessibilityGranted else {
+            listenerActive = false
+            deviceConnected = false
+            notice = "原生六鍵仍可用；允許「輔助使用」後，雙按與長按才會啟用。"
+            refreshUI()
+            return
+        }
+
+        guard vendorApplicationIsNotRunning else {
+            listenerActive = false
+            deviceConnected = false
+            notice = "Ulanzi Studio 執行中；已保留 AU05 原生模式。"
+            refreshUI()
+            return
+        }
+
+        do {
+            try validateAllProfilesForOnlineMode()
+        } catch {
+            listenerActive = false
+            deviceConnected = false
+            notice = "原生六鍵仍可用；進階手勢設定無效：\(error.localizedDescription)"
+            refreshUI()
+            return
+        }
 
         do {
             try hardwareListener?.start(promptForPermission: promptForPermission)
             listenerActive = true
-
-            if accessibilityGranted {
-                if notice?.contains("權限") == true || notice?.hasPrefix("監聽失敗") == true {
-                    notice = nil
-                }
-            } else {
-                notice = "需要「輔助使用」權限，才能送出你設定的按鍵。"
+            if notice?.contains("權限") == true || notice?.hasPrefix("監聽失敗") == true {
+                notice = nil
             }
         } catch {
             listenerActive = false
@@ -163,19 +385,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func resetKnobPressState() {
-        knobPressTimer?.invalidate()
-        knobPressTimer = nil
+        knobLongPressTimer?.invalidate()
+        knobLongPressTimer = nil
+        knobSinglePressTimer?.invalidate()
+        knobSinglePressTimer = nil
         knobPressStateMachine.reset()
     }
 
-    private func handleDeviceRemoval() {
+    private func cancelPendingInput() {
         resetKnobPressState()
+        actionPerformer.releaseAll()
+    }
+
+    private func handleDeviceRemoval() {
+        cancelPendingInput()
+        offlineStateUnconfirmed = false
         deviceConnected = false
         notice = "AU05 已移除；未完成的旋鈕按壓已取消。"
         refreshUI()
     }
 
     private func handle(_ deviceEvent: DeviceEvent, at timestamp: TimeInterval) {
+        guard listenerActive,
+              deviceConnected,
+              !hardwareSyncInProgress,
+              !needsHardwareSync else { return }
         let eventTime = String(format: "%.6f", timestamp)
         logger.notice(
             "HID event: \(String(describing: deviceEvent), privacy: .public) time=\(eventTime, privacy: .public)"
@@ -183,25 +417,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         switch deviceEvent {
         case let .key(control: .knobPress, phase: phase):
             handleKnobPress(phase, at: timestamp)
-        case let .key(control: control, phase: .down):
-            performConfiguredAction(for: control)
-        case .key(control: _, phase: .up):
-            break
+        case let .key(control: control, phase: phase):
+            handleOrdinaryControl(control, phase: phase)
+        }
+    }
+
+    private func handleOrdinaryControl(_ control: InputControl, phase: KeyPhase) {
+        guard phase == .down else { return }
+        let binding = configuration[configuration.activeProfile][control]
+        do {
+            // AU05 controls are macro triggers. Send one complete tap on down
+            // so a crash can never leave a synthetic modifier held.
+            try actionPerformer.tap(binding, for: control)
+        } catch {
+            notice = "按鍵執行失敗：\(error.localizedDescription)"
+            refreshUI()
         }
     }
 
     private func handleKnobPress(_ phase: KeyPhase, at timestamp: TimeInterval) {
         switch phase {
         case .down:
-            if let decision = knobPressStateMachine.pressDown(at: timestamp) {
-                applyKnobPressDecision(decision)
-            }
+            applyKnobPressDecisions(knobPressStateMachine.pressDown(at: timestamp))
         case .up:
-            knobPressTimer?.invalidate()
-            knobPressTimer = nil
-            if let decision = knobPressStateMachine.pressUp(at: timestamp) {
-                applyKnobPressDecision(decision)
-            }
+            knobLongPressTimer?.invalidate()
+            knobLongPressTimer = nil
+            applyKnobPressDecisions(knobPressStateMachine.pressUp(at: timestamp))
+        }
+    }
+
+    private func applyKnobPressDecisions(_ decisions: [KnobPressDecision]) {
+        for decision in decisions {
+            applyKnobPressDecision(decision)
         }
     }
 
@@ -209,64 +456,97 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         logger.notice("Knob decision: \(String(describing: decision), privacy: .public)")
         switch decision {
         case let .scheduleLongPress(delay):
-            knobPressTimer?.invalidate()
+            knobLongPressTimer?.invalidate()
             let timer = Timer(timeInterval: delay, repeats: false) { [weak self] _ in
                 guard let self else { return }
-                self.knobPressTimer = nil
-                if let decision = self.knobPressStateMachine.longPressTimerFired() {
+                self.knobLongPressTimer = nil
+                self.applyKnobPressDecisions(
+                    self.knobPressStateMachine.longPressTimerFired()
+                )
+            }
+            knobLongPressTimer = timer
+            RunLoop.main.add(timer, forMode: .common)
+        case let .scheduleSinglePress(delay):
+            knobSinglePressTimer?.invalidate()
+            let timer = Timer(timeInterval: delay, repeats: false) { [weak self] _ in
+                guard let self else { return }
+                self.knobSinglePressTimer = nil
+                if let decision = self.knobPressStateMachine.singlePressTimerFired() {
                     self.applyKnobPressDecision(decision)
                 }
             }
-            knobPressTimer = timer
+            knobSinglePressTimer = timer
             RunLoop.main.add(timer, forMode: .common)
-        case .performShortPress:
-            performConfiguredAction(for: .knobPress)
+        case .cancelPendingSinglePress:
+            knobSinglePressTimer?.invalidate()
+            knobSinglePressTimer = nil
+        case .performSinglePress:
+            performGestureBinding(for: .knobPress)
+        case .performDoublePress:
+            performGestureBinding(for: .knobDoublePress)
+        case .longPressRecognized:
+            notice = "已辨識長按；放開旋鈕後切換設定組。"
+            refreshUI()
         case .switchProfile:
             switchProfile()
         }
     }
 
-    private func performConfiguredAction(for control: InputControl) {
-        let action = configuration[configuration.activeProfile][control]
-        let resolved = ActionResolver.resolve(action)
-
-        if resolved == .switchProfile {
+    private func performGestureBinding(for control: InputControl) {
+        let binding = configuration[configuration.activeProfile][control]
+        if binding == .preset(.switchProfile) {
             switchProfile()
-        } else if resolved != .none {
-            guard accessibilityGranted else {
-                notice = "需要「輔助使用」權限，才能送出你設定的按鍵。"
-                refreshUI()
-                return
-            }
-            actionPerformer.perform(resolved)
+            return
+        }
+
+        do {
+            try actionPerformer.tap(binding, for: control)
+        } catch {
+            notice = "按鍵執行失敗：\(error.localizedDescription)"
+            refreshUI()
         }
     }
 
     private func switchProfile() {
+        let previousConfiguration = configuration
+        actionPerformer.releaseAll()
         configuration.activeProfile = configuration.activeProfile.toggled
+        guard persistConfiguration() else {
+            configuration = previousConfiguration
+            refreshUI()
+            return
+        }
         logger.notice(
             "Profile switched to \(self.configuration.activeProfile.rawValue, privacy: .public)"
         )
-        notice = "已切換到「\(configuration.activeProfile.displayName)」設定組。"
-        persistConfiguration()
+        notice = "已切換到「\(configuration.activeProfile.displayName)」；離線備用未更動。"
         refreshUI()
     }
 
     private func confirmAndSyncHardware() {
         guard !hardwareSyncInProgress else { return }
+        let profileID = configuration.activeProfile
 
         let alert = NSAlert()
         alert.alertStyle = .warning
-        alert.messageText = "要同步 6 個硬體動作嗎？"
-        alert.informativeText = "這會把裝置的上、中、下鍵與旋鈕三個動作覆寫為 F13–F18。AI／系統的 12 格設定仍保存在 VibeKey Lite。"
+        alert.messageText = "要重寫目前這組 6 個原生按鍵嗎？"
+        alert.informativeText = "這會把「\(profileID.displayName)」的完整六格寫入 AU05；關掉 VibeKey Lite 後仍可使用。"
         alert.addButton(withTitle: "同步")
         alert.addButton(withTitle: "取消")
 
         guard alert.runModal() == .alertFirstButtonReturn else { return }
-        syncHardware()
+        syncHardware(profileID: profileID)
     }
 
-    private func syncHardware() {
+    private func syncHardware(profileID: ProfileID) {
+        guard configurationReady else {
+            notice = "設定檔無法使用；未寫入 AU05。"
+            refreshUI()
+            return
+        }
+
+        guard !hardwareSyncInProgress else { return }
+
         let vendorBundleIdentifier = "ulanzi.UlanziStudio"
         guard NSRunningApplication.runningApplications(
             withBundleIdentifier: vendorBundleIdentifier
@@ -276,14 +556,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
+        if !needsHardwareSync {
+            let previousConfiguration = configuration
+            configuration.needsHardwareSync = true
+            guard persistConfiguration() else {
+                configuration = previousConfiguration
+                refreshUI()
+                return
+            }
+            needsHardwareSync = true
+        }
+
         hardwareSyncInProgress = true
-        notice = "正在同步 6 個硬體動作…"
+        vendorInterferedDuringHardwareSync = false
+        if let error = suspendEnhancedMode() {
+            hardwareSyncInProgress = false
+            notice = "未寫入 AU05：\(error.localizedDescription)"
+            refreshUI()
+            return
+        }
+        let profile = configuration[profileID]
+        notice = "正在寫入「\(profileID.displayName)」原生按鍵…"
         refreshUI()
 
         let configurator = hardwareConfigurator
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let result = Result {
-                try configurator.apply(layout: .vibeKeyDefault)
+                try configurator.apply(profile: profile)
             }
 
             DispatchQueue.main.async {
@@ -292,9 +591,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
                 switch result {
                 case .success:
-                    self.notice = "已同步到裝置：6 個硬體動作已設為 F13–F18。"
+                    self.offlineStateUnconfirmed = false
+                    if self.vendorInterferedDuringHardwareSync
+                        || !self.vendorApplicationIsNotRunning {
+                        self.configuration.needsHardwareSync = true
+                        self.needsHardwareSync = true
+                        self.notice = "Ulanzi Studio 在寫入時開啟；裝置內容不確定。請關閉它，再按「離線備用」。"
+                    } else if let markerSaveError = self.completeHardwareSync(profileID: profileID) {
+                        self.notice = "已寫入「\(profileID.displayName)」，但同步狀態保存失敗：\(markerSaveError) 下次啟動會再寫一次。"
+                    } else {
+                        self.notice = "已寫入「\(profileID.displayName)」：關掉 App 仍可使用。"
+                    }
+                    self.logger.notice(
+                        "Hardware profile \(profileID.rawValue, privacy: .public) written successfully"
+                    )
+                    if !self.needsHardwareSync,
+                       !self.listenerActive,
+                       self.enhancedModeRequested {
+                        self.startHardwareListener(promptForPermission: true)
+                    }
                 case let .failure(error):
-                    self.notice = "同步失敗：\(error.localizedDescription)"
+                    if let configurationError = error as? IOKitHardwareConfiguratorError {
+                        switch configurationError {
+                        case .offlineWriteFailed:
+                            self.offlineStateUnconfirmed = true
+                            self.notice = "同步中止：\(error.localizedDescription) 六鍵尚未開始寫入；請保持連接再試。"
+                        case .reportWriteFailed:
+                            self.offlineStateUnconfirmed = false
+                            self.notice = "同步失敗：\(error.localizedDescription) 裝置可能只寫入部分；請保持連接，再按「離線備用」。"
+                        default:
+                            self.notice = "同步中止：\(error.localizedDescription) 六鍵尚未開始寫入。"
+                        }
+                    } else {
+                        self.notice = "同步失敗：\(error.localizedDescription)"
+                    }
+                    self.logger.error(
+                        "Hardware profile write failed: \(error.localizedDescription, privacy: .public)"
+                    )
                 }
 
                 self.refreshUI()
@@ -302,10 +635,54 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func persistConfiguration() {
+    private var vendorApplicationIsNotRunning: Bool {
+        NSRunningApplication.runningApplications(
+            withBundleIdentifier: "ulanzi.UlanziStudio"
+        ).isEmpty
+    }
+
+    private var onlinePreflightIsValid: Bool {
+        guard configurationReady,
+              configuration.offlineProfile != nil,
+              !needsHardwareSync,
+              vendorApplicationIsNotRunning,
+              IOHIDListenAccess.isGranted,
+              AccessibilityAccess.isTrusted(promptForPermission: false) else {
+            return false
+        }
+        return (try? validateAllProfilesForOnlineMode()) != nil
+    }
+
+    private func validateAllProfilesForOnlineMode() throws {
+        try actionPerformer.validate(profile: configuration.profileA)
+        try actionPerformer.validate(profile: configuration.profileB)
+    }
+
+    private func completeHardwareSync(profileID: ProfileID) -> String? {
+        guard let configStore else {
+            return "設定檔位置不可用。"
+        }
+
+        let previousOfflineProfile = configuration.offlineProfile
+        configuration.offlineProfile = profileID
+        configuration.needsHardwareSync = false
+        do {
+            try configStore.save(configuration)
+            needsHardwareSync = false
+            return nil
+        } catch {
+            configuration.offlineProfile = previousOfflineProfile
+            configuration.needsHardwareSync = true
+            needsHardwareSync = true
+            return error.localizedDescription
+        }
+    }
+
+    @discardableResult
+    private func persistConfiguration() -> Bool {
         guard let configStore else {
             notice = "設定檔位置不可用，這次變更尚未保存。"
-            return
+            return false
         }
 
         do {
@@ -313,8 +690,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if notice?.contains("尚未保存") == true || notice?.hasPrefix("設定檔") == true {
                 notice = nil
             }
+            return true
         } catch {
             notice = "設定檔保存失敗：\(error.localizedDescription)"
+            return false
         }
     }
 
@@ -362,13 +741,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func togglePopover(_ sender: Any?) {
-        guard let button = statusItem?.button, let popover else { return }
+        guard statusItem?.button != nil, let popover else { return }
 
         if popover.isShown {
             popover.performClose(sender)
         } else {
-            popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
-            NSApplication.shared.activate(ignoringOtherApps: true)
+            showPopover()
         }
+    }
+
+    private func showPopover() {
+        guard let button = statusItem?.button,
+              let popover,
+              !popover.isShown else { return }
+        popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        NSApplication.shared.activate(ignoringOtherApps: true)
     }
 }

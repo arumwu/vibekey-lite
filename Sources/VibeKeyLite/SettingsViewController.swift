@@ -3,9 +3,10 @@ import VibeKeyLiteCore
 
 final class SettingsViewController: NSViewController {
     var onProfileSelected: ((ProfileID) -> Void)?
-    var onMappingChanged: ((ProfileID, InputControl, KeyAction) -> Void)?
+    var onMappingChanged: ((ProfileID, InputControl, ControlBinding) -> Void)?
     var onRestartApplication: (() -> Void)?
     var onSyncHardware: (() -> Void)?
+    var onToggleEnhancedMode: (() -> Void)?
     var onQuit: (() -> Void)?
 
     private var configuration: AppConfiguration
@@ -23,11 +24,22 @@ final class SettingsViewController: NSViewController {
     )
     private let statusLabel = NSTextField(labelWithString: "")
     private lazy var syncButton = NSButton(
-        title: "同步到裝置",
+        title: "離線備用",
         target: self,
         action: #selector(syncHardware(_:))
     )
+    private lazy var restartButton = NSButton(
+        title: "重啟",
+        target: self,
+        action: #selector(restartApplication(_:))
+    )
+    private lazy var enhancedModeButton = NSButton(
+        title: "只用原生",
+        target: self,
+        action: #selector(toggleEnhancedMode(_:))
+    )
     private var actionPopups: [InputControl: NSPopUpButton] = [:]
+    private let recordShortcutToken = "__record_native_shortcut__"
 
     init(configuration: AppConfiguration) {
         self.configuration = configuration
@@ -46,7 +58,7 @@ final class SettingsViewController: NSViewController {
         title.font = .systemFont(ofSize: 18, weight: .semibold)
 
         let explanation = NSTextField(
-            wrappingLabelWithString: "旋鈕短按執行「旋鈕短按」那一格；長按約 0.65 秒切換 AI／系統。"
+            wrappingLabelWithString: "旋鈕單按、雙按可各自設定；按住 0.65 秒固定切換 AI／系統。"
         )
         explanation.textColor = .secondaryLabelColor
         explanation.font = .systemFont(ofSize: 12)
@@ -67,7 +79,7 @@ final class SettingsViewController: NSViewController {
         let mappingGrid = makeMappingGrid()
 
         let syncExplanation = NSTextField(
-            wrappingLabelWithString: "第一次使用須同步；這會把裝置的 6 個硬體動作覆寫為 F13–F18。"
+            wrappingLabelWithString: "按「離線備用」才會把目前六個單按寫進 AU05；App 結束後使用那一組。"
         )
         syncExplanation.textColor = .secondaryLabelColor
         syncExplanation.font = .systemFont(ofSize: 11)
@@ -76,14 +88,10 @@ final class SettingsViewController: NSViewController {
         statusLabel.lineBreakMode = .byWordWrapping
         statusLabel.font = .systemFont(ofSize: 11)
 
-        let retryButton = NSButton(
-            title: "套用並重啟",
-            target: self,
-            action: #selector(restartApplication(_:))
-        )
-        retryButton.bezelStyle = .rounded
+        restartButton.bezelStyle = .rounded
 
         syncButton.bezelStyle = .rounded
+        enhancedModeButton.bezelStyle = .rounded
 
         let quitButton = NSButton(
             title: "結束",
@@ -92,7 +100,13 @@ final class SettingsViewController: NSViewController {
         )
         quitButton.bezelStyle = .rounded
 
-        let buttons = NSStackView(views: [syncButton, retryButton, NSView(), quitButton])
+        let buttons = NSStackView(views: [
+            syncButton,
+            restartButton,
+            enhancedModeButton,
+            NSView(),
+            quitButton
+        ])
         buttons.orientation = .horizontal
         buttons.alignment = .centerY
         buttons.spacing = 8
@@ -149,7 +163,7 @@ final class SettingsViewController: NSViewController {
     private func makeMappingGrid() -> NSGridView {
         let rows: [[NSView]] = InputControl.allCases.map { control in
             let label = NSTextField(
-                labelWithString: "\(control.displayName)  \(control.sourceFunctionKey)"
+                labelWithString: control.displayName
             )
             let popup = NSPopUpButton(frame: .zero, pullsDown: false)
             popup.identifier = NSUserInterfaceItemIdentifier(control.rawValue)
@@ -167,10 +181,36 @@ final class SettingsViewController: NSViewController {
                 popup.menu?.addItem(heading)
 
                 for action in KeyAction.allCases where action.category == category {
-                    popup.addItem(withTitle: action.displayName)
+                    if action == .switchProfile, control != .knobDoublePress {
+                        continue
+                    }
+                    let supported = action == .switchProfile
+                        || PresetNativeShortcutResolver.resolve(action) != .unsupported
+                    let title = supported
+                        ? action.displayName
+                        : "\(action.displayName)（AU05 離線不支援）"
+                    popup.addItem(withTitle: title)
                     popup.lastItem?.representedObject = action.rawValue
+                    popup.lastItem?.isEnabled = supported
                 }
             }
+
+            popup.menu?.addItem(.separator())
+            let recordItem = NSMenuItem(
+                title: "錄製鍵盤按鍵…",
+                action: nil,
+                keyEquivalent: ""
+            )
+            recordItem.representedObject = recordShortcutToken
+            popup.menu?.addItem(recordItem)
+
+            let fnItem = NSMenuItem(
+                title: "Fn（AU05 離線不支援）",
+                action: nil,
+                keyEquivalent: ""
+            )
+            fnItem.isEnabled = false
+            popup.menu?.addItem(fnItem)
 
             popup.widthAnchor.constraint(greaterThanOrEqualToConstant: 190).isActive = true
             actionPopups[control] = popup
@@ -187,36 +227,54 @@ final class SettingsViewController: NSViewController {
 
     private func reloadControls() {
         profileSelector.selectedSegment = configuration.activeProfile == .a ? 0 : 1
+        profileSelector.isEnabled = !hardwareSyncInProgress
         syncButton.isEnabled = !hardwareSyncInProgress
-        syncButton.title = hardwareSyncInProgress ? "同步中…" : "同步到裝置"
+        restartButton.isEnabled = !hardwareSyncInProgress
+        enhancedModeButton.isEnabled = !hardwareSyncInProgress
+        enhancedModeButton.title = listenerActive ? "只用原生" : "啟用手勢"
+        syncButton.title = hardwareSyncInProgress ? "寫入中…" : "離線備用"
         let profile = configuration.activeProfile
 
         for control in InputControl.allCases {
-            let action = configuration[profile][control]
+            let binding = configuration[profile][control]
             let popup = actionPopups[control]
-            let matchingItem = popup?.itemArray.first {
-                ($0.representedObject as? String) == action.rawValue
+            let matchingItem: NSMenuItem?
+            switch binding {
+            case let .preset(action):
+                matchingItem = popup?.itemArray.first {
+                    ($0.representedObject as? String) == action.rawValue
+                }
+                popup?.itemArray.first {
+                    ($0.representedObject as? String) == recordShortcutToken
+                }?.title = "錄製鍵盤按鍵…"
+            case let .shortcut(shortcut):
+                matchingItem = popup?.itemArray.first {
+                    ($0.representedObject as? String) == recordShortcutToken
+                }
+                matchingItem?.title = "自訂：\(shortcut.displayName)"
             }
             popup?.select(matchingItem)
+            popup?.isEnabled = !hardwareSyncInProgress
         }
 
-        if !listenerActive {
-            statusLabel.stringValue = notice ?? "尚未取得輸入監控權限，無法讀取 AU05。"
+        if !accessibilityGranted {
+            statusLabel.stringValue = notice ?? "原生六鍵仍可用；允許輔助使用後才會啟用多重手勢。"
             statusLabel.textColor = .systemOrange
-        } else if !accessibilityGranted {
-            statusLabel.stringValue = "已可讀取 AU05，但缺少「輔助使用」權限，尚不能送出設定動作。"
+        } else if !listenerActive {
+            statusLabel.stringValue = notice ?? "原生按鍵仍可用；允許輸入監控後才能長按切換。"
             statusLabel.textColor = .systemOrange
         } else if let notice {
             statusLabel.stringValue = notice
-            if notice.hasPrefix("已同步") {
+            if notice.hasPrefix("已寫入") {
                 statusLabel.textColor = .systemGreen
-            } else if notice.hasPrefix("正在同步") {
+            } else if notice.hasPrefix("正在寫入") {
                 statusLabel.textColor = .secondaryLabelColor
             } else {
                 statusLabel.textColor = .systemOrange
             }
         } else if deviceConnected {
-            statusLabel.stringValue = "AU05 已連接；讀取與動作權限都可用。"
+            let offlineName = configuration.offlineProfile?.displayName ?? "尚未設定"
+            statusLabel.stringValue = "AU05 已連接；三種手勢可用。離線備用：\(offlineName)。"
             statusLabel.textColor = .secondaryLabelColor
         } else {
             statusLabel.stringValue = "權限可用，正在等待 AU05。"
@@ -232,12 +290,42 @@ final class SettingsViewController: NSViewController {
     @objc private func mappingChanged(_ sender: NSPopUpButton) {
         guard let rawControl = sender.identifier?.rawValue,
               let control = InputControl(rawValue: rawControl),
-              let rawAction = sender.selectedItem?.representedObject as? String,
-              let action = KeyAction(rawValue: rawAction) else {
+              let rawAction = sender.selectedItem?.representedObject as? String else {
+            return
+        }
+        let profile = configuration.activeProfile
+
+        if rawAction == recordShortcutToken {
+            guard let result = KeyboardShortcutRecorder.record() else {
+                reloadControls()
+                return
+            }
+
+            switch result {
+            case let .success(shortcut):
+                onMappingChanged?(
+                    profile,
+                    control,
+                    .shortcut(shortcut)
+                )
+            case let .failure(error):
+                let alert = NSAlert(error: error)
+                alert.runModal()
+                reloadControls()
+            }
             return
         }
 
-        onMappingChanged?(configuration.activeProfile, control, action)
+        guard let action = KeyAction(rawValue: rawAction) else {
+            reloadControls()
+            return
+        }
+
+        onMappingChanged?(
+            profile,
+            control,
+            .preset(action)
+        )
     }
 
     @objc private func restartApplication(_ sender: Any?) {
@@ -246,6 +334,10 @@ final class SettingsViewController: NSViewController {
 
     @objc private func syncHardware(_ sender: Any?) {
         onSyncHardware?()
+    }
+
+    @objc private func toggleEnhancedMode(_ sender: Any?) {
+        onToggleEnhancedMode?()
     }
 
     @objc private func quit(_ sender: Any?) {
