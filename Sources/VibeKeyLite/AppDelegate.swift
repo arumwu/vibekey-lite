@@ -16,6 +16,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var knobLongPressTimer: Timer?
     private var knobSinglePressTimer: Timer?
     private var powerHandoffTimer: Timer?
+    private var startupRecoveryTimer: Timer?
+    private var startupRecoveryAttemptsRemaining = 0
     private var powerHandoffStateMachine = VibeKeyPowerHandoffStateMachine(idleInterval: 300)
     private let logger = Logger(
         subsystem: "io.github.arumwu.VibeKeyLite",
@@ -57,6 +59,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             refreshUI()
         } else {
             startHardwareListener(promptForPermission: true)
+            scheduleStartupConnectionRecovery()
         }
 
         if ProcessInfo.processInfo.environment["VIBEKEY_SHOW_SETTINGS"] == "1" {
@@ -72,6 +75,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         workspaceObservers.removeAll()
         powerHandoffTimer?.invalidate()
         powerHandoffTimer = nil
+        startupRecoveryTimer?.invalidate()
+        startupRecoveryTimer = nil
         resetKnobPressState()
         actionPerformer.releaseAll()
         if let error = hardwareListener?.stop() {
@@ -217,6 +222,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         reason: .onlinePrerequisiteLost
                     )
                 } else {
+                    self.startupRecoveryTimer?.invalidate()
+                    self.startupRecoveryTimer = nil
+                    self.startupRecoveryAttemptsRemaining = 0
                     self.applyPowerHandoffDecisions(
                         self.powerHandoffStateMachine.onlineStarted(
                             at: HIDMonotonicClock.now
@@ -255,6 +263,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ) { [weak self] _ in
             self?.stopEnhancedMode(
                 notice: "Mac 即將睡眠；AU05 已退回裝置原生按鍵。"
+            )
+        })
+
+        workspaceObservers.append(center.addObserver(
+            forName: NSWorkspace.willPowerOffNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.stopEnhancedMode(
+                notice: "Mac 即將關機；AU05 已退回裝置原生按鍵。"
             )
         })
 
@@ -517,9 +535,50 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             listenerActive = false
             deviceConnected = false
             notice = "監聽失敗：\(error.localizedDescription)"
+            logger.error(
+                "Listener startup failed: \(error.localizedDescription, privacy: .public)"
+            )
         }
 
         refreshUI()
+    }
+
+    private func scheduleStartupConnectionRecovery() {
+        guard !deviceConnected,
+              enhancedModeRequested,
+              !needsHardwareSync else { return }
+        startupRecoveryAttemptsRemaining = 3
+        scheduleNextStartupConnectionRecovery()
+    }
+
+    private func scheduleNextStartupConnectionRecovery() {
+        startupRecoveryTimer?.invalidate()
+        guard startupRecoveryAttemptsRemaining > 0,
+              !deviceConnected else { return }
+
+        let timer = Timer(timeInterval: 2, repeats: false) { [weak self] _ in
+            guard let self else { return }
+            self.startupRecoveryTimer = nil
+            guard !self.deviceConnected,
+                  self.enhancedModeRequested,
+                  !self.needsHardwareSync else { return }
+
+            self.startupRecoveryAttemptsRemaining -= 1
+            self.logger.notice(
+                "Retrying startup connection; attempts remaining=\(self.startupRecoveryAttemptsRemaining, privacy: .public)"
+            )
+            if let error = self.suspendEnhancedMode() {
+                self.notice = "自動重連失敗：\(error.localizedDescription)"
+                self.refreshUI()
+                return
+            }
+            self.startHardwareListener(promptForPermission: false)
+            if !self.deviceConnected {
+                self.scheduleNextStartupConnectionRecovery()
+            }
+        }
+        startupRecoveryTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
     }
 
     private func resetKnobPressState() {

@@ -61,6 +61,7 @@ final class IOKitHardwareListener {
     private var wakeRequestDelivered = false
     private var nativeWakeReportID: UInt32?
     private let heartbeatInterval: TimeInterval
+    private let startupResetDelay: TimeInterval
     private let logger = Logger(
         subsystem: "io.github.arumwu.VibeKeyLite",
         category: "HID"
@@ -119,6 +120,7 @@ final class IOKitHardwareListener {
 
     init(
         heartbeatInterval: TimeInterval = 0.8,
+        startupResetDelay: TimeInterval = 0.08,
         eventHandler: @escaping (DeviceEvent, TimeInterval) -> Void,
         powerResponseHandler: @escaping (VibeKeyPowerResponse) -> Void,
         noticeHandler: @escaping (VibeKeyDeviceNotice) -> Void,
@@ -129,6 +131,7 @@ final class IOKitHardwareListener {
         shouldRemainOnline: @escaping () -> Bool
     ) {
         self.heartbeatInterval = heartbeatInterval
+        self.startupResetDelay = startupResetDelay
         self.eventHandler = eventHandler
         self.powerResponseHandler = powerResponseHandler
         self.noticeHandler = noticeHandler
@@ -286,7 +289,11 @@ final class IOKitHardwareListener {
             return
         }
 
-        if let error = enterOnlineModeSynchronously(on: device) {
+        // A host reboot can interrupt the previous process before it sends the
+        // offline packet. Always establish a clean native baseline before a
+        // fresh app session enters online mode. This does not rewrite any of
+        // the six shortcuts stored in device flash.
+        if let error = enterOnlineModeSynchronously(on: device, resetFirst: true) {
             deliverOnMain { [failureHandler] in failureHandler(error) }
             return
         }
@@ -486,13 +493,35 @@ final class IOKitHardwareListener {
         }
     }
 
-    private func enterOnlineModeSynchronously(on device: IOHIDDevice) -> Error? {
+    private func enterOnlineModeSynchronously(
+        on device: IOHIDDevice,
+        resetFirst: Bool = false
+    ) -> Error? {
+        let offlineReport: [UInt8]?
+        if resetFirst {
+            guard let report = try? VibeKeyPacketCodec.softwareOnlineReport(false) else {
+                return IOKitHardwareListenerError.offlineWriteFailed(code: kIOReturnError)
+            }
+            offlineReport = report
+        } else {
+            offlineReport = nil
+        }
+
         guard let onlineReport = try? VibeKeyPacketCodec.softwareOnlineReport(true),
               let heartbeatReport = try? VibeKeyPacketCodec.heartbeatReport() else {
             return IOKitHardwareListenerError.heartbeatWriteFailed(code: kIOReturnError)
         }
 
         return HIDOutputSerialQueue.queue.sync {
+            if let offlineReport {
+                let offlineResult = Self.write(report: offlineReport, to: device)
+                guard offlineResult == kIOReturnSuccess else {
+                    return IOKitHardwareListenerError.offlineWriteFailed(code: offlineResult)
+                }
+                logger.notice("AU05 startup reset to native mode")
+                Thread.sleep(forTimeInterval: startupResetDelay)
+            }
+
             let onlineResult = Self.write(report: onlineReport, to: device)
             guard onlineResult == kIOReturnSuccess else {
                 return IOKitHardwareListenerError.heartbeatWriteFailed(code: onlineResult)

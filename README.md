@@ -24,6 +24,7 @@ AU05 韌體只會離線保存單按。為了同時分辨三種手勢，VibeKey L
 - 雙按使用「旋鈕雙按」那一格；預設是切換 AI／系統。
 - 長按達 0.65 秒後，放開時切換 AI／系統。
 - 正常結束、Mac 睡眠、Ulanzi Studio 開啟或線上傳輸失敗時，App 會明確退出線上模式，讓 AU05 回到原生六鍵。
+- Mac 關機前會強制交還原生模式；下次啟動會先清除可能殘留的線上狀態，再重新連線。若開機時 USB 尚未就緒，會自動重試三次；全程不會重寫六鍵設定。
 - 裝置閒置達它保存的待機時間後，App 會停止線上心跳並交還原生模式，讓 AU05 自行待機與關機。
 - 睡醒第一下使用離線備用的原生單按；App 偵測到該輸入後，後續單按、雙按與長按會自動恢復。
 - 待機前後打開選單列設定只會查看狀態，不會喚醒 AU05，也不會重算閒置時間。
@@ -104,6 +105,7 @@ The AU05 firmware stores only single-press actions offline. While VibeKey Lite r
 - A double press uses its own configurable row and switches profiles by default.
 - A 0.65-second hold switches profiles when released.
 - Normal quit, Mac sleep, vendor-app launch, or transport failure explicitly leaves online mode and restores native operation.
+- Before Mac shutdown the app forces native mode; the next launch clears any stale online state before reconnecting. If USB is not ready yet, it retries three times without rewriting the six stored shortcuts.
 - When the saved device standby delay elapses without AU05 input, the app stops host-online traffic and hands control back to native mode so firmware standby and power-off can run.
 - The first wake input completes the offline backup's native single-press action, including key release; the app then restores all subsequent single-, double-, and long-press gestures.
 - Opening the menu bar settings only shows status; it neither wakes the AU05 nor restarts the inactivity timer.
