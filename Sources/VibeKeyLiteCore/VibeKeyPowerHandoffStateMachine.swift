@@ -86,13 +86,20 @@ public struct VibeKeyPowerHandoffStateMachine: Equatable, Sendable {
         return [.handoffForStandby]
     }
 
-    /// Device notices update runtime status only. Resuming on `powerOn` or
-    /// `deviceActive` could suppress the key-up half of the first native
-    /// shortcut, so the standard-HID release is the sole device wake signal.
+    /// A positive wake notice means the controller is ready again. Resume
+    /// immediately so a controller that powered itself off does not remain in
+    /// native-only mode until the user happens to press a detectable shortcut.
+    /// Standard-HID input remains a fallback for firmware that omits notices.
     public mutating func noticeReceived(
         _ notice: VibeKeyDeviceNotice
     ) -> [VibeKeyPowerHandoffDecision] {
-        []
+        guard mode == .handedOffForStandby else { return [] }
+        switch notice {
+        case .powerOn, .deviceActive(isActive: true), .standby(status: 0):
+            return beginResume()
+        case .deviceActive(isActive: false), .standby:
+            return []
+        }
     }
 
     /// The standard-HID path calls this only after the first native shortcut

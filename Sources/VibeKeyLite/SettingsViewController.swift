@@ -271,7 +271,7 @@ final class SettingsViewController: NSViewController {
             statusMessage = notice ?? "原生按鍵仍可用；允許輸入監控後才能長按切換。"
             statusLabel.textColor = .systemOrange
         } else if powerSaving {
-            statusMessage = notice ?? "閒置省電中；第一下使用原生單按，接著恢復三種手勢。"
+            statusMessage = notice ?? "閒置省電中；控制器醒來後會自動恢復三種手勢。"
             statusLabel.textColor = .secondaryLabelColor
         } else if let notice {
             statusMessage = notice

@@ -70,12 +70,23 @@ final class VibeKeyPowerHandoffStateMachineTests: XCTestCase {
         XCTAssertEqual(machine.standbyHandoffDeadlineReached(at: 311), [])
     }
 
-    func testNoticesDoNotStealTheFirstNativeShortcut() {
+    func testPositiveWakeNoticesRequestOneResume() {
         for notice in [
             VibeKeyDeviceNotice.powerOn,
             .deviceActive(isActive: true),
-            .deviceActive(isActive: false),
-            .standby(status: 0),
+            .standby(status: 0)
+        ] {
+            var machine = handedOffMachine()
+            XCTAssertEqual(machine.noticeReceived(notice), [.resumeOnline])
+            XCTAssertEqual(machine.mode, .resumePending)
+            XCTAssertEqual(machine.noticeReceived(notice), [])
+            XCTAssertEqual(machine.wakeInputReceived(), [])
+        }
+    }
+
+    func testInactiveNoticesKeepStandardHIDWakeFallback() {
+        for notice in [
+            VibeKeyDeviceNotice.deviceActive(isActive: false),
             .standby(status: 1)
         ] {
             var machine = handedOffMachine()

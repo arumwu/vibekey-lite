@@ -95,7 +95,8 @@ final class IOKitHardwareListener {
         return nil
     }
 
-    /// Re-enters host-online mode after the first native wake input.
+    /// Re-enters host-online mode after a controller wake notice or the
+    /// standard-HID fallback detects the first native input.
     func resumeFromPowerSaving() -> Error? {
         guard parkedForPowerSaving, let device = inputDevice else {
             return IOKitHardwareListenerError.invalidPowerSavingTransition
@@ -114,7 +115,7 @@ final class IOKitHardwareListener {
         onlineGeneration &+= 1
         startHeartbeat()
         refreshPowerStatus()
-        logger.notice("AU05 resumed host-online mode after native wake input")
+        logger.notice("AU05 resumed host-online mode after controller wake")
         return nil
     }
 

@@ -16,8 +16,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var knobLongPressTimer: Timer?
     private var knobSinglePressTimer: Timer?
     private var powerHandoffTimer: Timer?
-    private var startupRecoveryTimer: Timer?
-    private var startupRecoveryAttemptsRemaining = 0
+    private var connectionRecoveryTimer: Timer?
+    private var connectionRecoveryAttemptsRemaining = 0
     private var powerHandoffStateMachine = VibeKeyPowerHandoffStateMachine(idleInterval: 300)
     private let logger = Logger(
         subsystem: "io.github.arumwu.VibeKeyLite",
@@ -59,7 +59,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             refreshUI()
         } else {
             startHardwareListener(promptForPermission: true)
-            scheduleStartupConnectionRecovery()
+            scheduleConnectionRecovery()
         }
 
         if ProcessInfo.processInfo.environment["VIBEKEY_SHOW_SETTINGS"] == "1" {
@@ -75,8 +75,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         workspaceObservers.removeAll()
         powerHandoffTimer?.invalidate()
         powerHandoffTimer = nil
-        startupRecoveryTimer?.invalidate()
-        startupRecoveryTimer = nil
+        connectionRecoveryTimer?.invalidate()
+        connectionRecoveryTimer = nil
         resetKnobPressState()
         actionPerformer.releaseAll()
         if let error = hardwareListener?.stop() {
@@ -222,16 +222,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         reason: .onlinePrerequisiteLost
                     )
                 } else {
-                    self.startupRecoveryTimer?.invalidate()
-                    self.startupRecoveryTimer = nil
-                    self.startupRecoveryAttemptsRemaining = 0
+                    self.connectionRecoveryTimer?.invalidate()
+                    self.connectionRecoveryTimer = nil
+                    self.connectionRecoveryAttemptsRemaining = 0
                     self.applyPowerHandoffDecisions(
                         self.powerHandoffStateMachine.onlineStarted(
                             at: HIDMonotonicClock.now
                         )
                     )
                 }
-                if connected, self.notice?.hasPrefix("AU05 已移除") == true {
+                if connected,
+                   self.notice?.hasPrefix("AU05 已移除") == true
+                    || self.notice?.hasPrefix("AU05 重新啟動") == true
+                    || self.notice?.hasPrefix("等待 AU05") == true {
                     self.notice = nil
                 }
                 self.refreshUI()
@@ -415,7 +418,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     notice = (stopError ?? error).localizedDescription
                 } else {
                     powerSaving = true
-                    notice = "閒置省電中；第一下使用原生單按，接著恢復三種手勢。"
+                    notice = "閒置省電中；控制器醒來後會自動恢復三種手勢。"
                 }
                 refreshUI()
 
@@ -423,7 +426,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 guard powerSaving else { continue }
                 if let error = hardwareListener?.resumeFromPowerSaving() {
                     let stopError = suspendEnhancedMode()
-                    notice = (stopError ?? error).localizedDescription
+                    logger.error(
+                        "Controller wake connection was stale: \(error.localizedDescription, privacy: .public)"
+                    )
+                    if let stopError {
+                        logger.error(
+                            "Stale connection cleanup reported: \(stopError.localizedDescription, privacy: .public)"
+                        )
+                    }
+                    notice = "AU05 重新啟動；正在自動重建連線。"
+                    scheduleConnectionRecovery()
                 } else {
                     powerSaving = false
                     devicePowerStatus.isStandby = false
@@ -543,41 +555,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         refreshUI()
     }
 
-    private func scheduleStartupConnectionRecovery() {
+    private func scheduleConnectionRecovery() {
         guard !deviceConnected,
               enhancedModeRequested,
               !needsHardwareSync else { return }
-        startupRecoveryAttemptsRemaining = 3
-        scheduleNextStartupConnectionRecovery()
+        connectionRecoveryAttemptsRemaining = 3
+        scheduleNextConnectionRecovery()
     }
 
-    private func scheduleNextStartupConnectionRecovery() {
-        startupRecoveryTimer?.invalidate()
-        guard startupRecoveryAttemptsRemaining > 0,
+    private func scheduleNextConnectionRecovery() {
+        connectionRecoveryTimer?.invalidate()
+        guard connectionRecoveryAttemptsRemaining > 0,
               !deviceConnected else { return }
 
         let timer = Timer(timeInterval: 2, repeats: false) { [weak self] _ in
             guard let self else { return }
-            self.startupRecoveryTimer = nil
+            self.connectionRecoveryTimer = nil
             guard !self.deviceConnected,
                   self.enhancedModeRequested,
                   !self.needsHardwareSync else { return }
 
-            self.startupRecoveryAttemptsRemaining -= 1
+            self.connectionRecoveryAttemptsRemaining -= 1
             self.logger.notice(
-                "Retrying startup connection; attempts remaining=\(self.startupRecoveryAttemptsRemaining, privacy: .public)"
+                "Rebuilding AU05 connection; attempts remaining=\(self.connectionRecoveryAttemptsRemaining, privacy: .public)"
             )
             if let error = self.suspendEnhancedMode() {
-                self.notice = "自動重連失敗：\(error.localizedDescription)"
-                self.refreshUI()
-                return
+                // A fully powered-off controller can make the final offline
+                // write fail. The manager was still closed, so continue with
+                // a fresh HID session instead of requiring an app restart.
+                self.logger.error(
+                    "Connection reset cleanup reported: \(error.localizedDescription, privacy: .public)"
+                )
             }
             self.startHardwareListener(promptForPermission: false)
-            if !self.deviceConnected {
-                self.scheduleNextStartupConnectionRecovery()
+            guard self.listenerActive, !self.deviceConnected else { return }
+            if self.connectionRecoveryAttemptsRemaining > 0 {
+                self.scheduleNextConnectionRecovery()
+            } else {
+                self.notice = "等待 AU05 重新開機；偵測到後會自動接回。"
+                self.refreshUI()
             }
         }
-        startupRecoveryTimer = timer
+        connectionRecoveryTimer = timer
         RunLoop.main.add(timer, forMode: .common)
     }
 
