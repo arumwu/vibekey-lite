@@ -190,7 +190,7 @@ final class SettingsViewController: NSViewController {
                     if action == .switchProfile, control != .knobDoublePress {
                         continue
                     }
-                    let supported = action == .switchProfile
+                    let supported = action == .switchProfile || action == .fnDoubleTap
                         || PresetNativeShortcutResolver.resolve(action) != .unsupported
                     let title = supported
                         ? action.displayName
@@ -209,14 +209,6 @@ final class SettingsViewController: NSViewController {
             )
             recordItem.representedObject = recordShortcutToken
             popup.menu?.addItem(recordItem)
-
-            let fnItem = NSMenuItem(
-                title: "Fn（AU05 離線不支援）",
-                action: nil,
-                keyEquivalent: ""
-            )
-            fnItem.isEnabled = false
-            popup.menu?.addItem(fnItem)
 
             popup.widthAnchor.constraint(greaterThanOrEqualToConstant: 190).isActive = true
             actionPopups[control] = popup

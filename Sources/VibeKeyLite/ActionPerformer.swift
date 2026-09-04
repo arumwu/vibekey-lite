@@ -43,6 +43,10 @@ final class ActionPerformer {
         switch try resolve(binding) {
         case .none, .switchProfile:
             return
+        case .fnDoubleTap:
+            try postFunctionKeyTap()
+            Thread.sleep(forTimeInterval: 0.08)
+            try postFunctionKeyTap()
         case let .media(keyType):
             postMediaKey(keyType)
         case let .shortcut(strokes):
@@ -84,6 +88,7 @@ final class ActionPerformer {
         case none
         case shortcut([Stroke])
         case media(Int32)
+        case fnDoubleTap
         case switchProfile
     }
 
@@ -92,6 +97,7 @@ final class ActionPerformer {
         switch binding {
         case let .preset(action):
             if action == .switchProfile { return .switchProfile }
+            if action == .fnDoubleTap { return .fnDoubleTap }
             nativeAction = PresetNativeShortcutResolver.resolve(action)
         case let .shortcut(shortcut):
             nativeAction = .shortcut(shortcut)
@@ -158,6 +164,15 @@ final class ActionPerformer {
         }
         event.flags = flags
         event.post(tap: .cghidEventTap)
+    }
+
+    private func postFunctionKeyTap() throws {
+        var flags = CGEventSource.flagsState(.combinedSessionState)
+        flags.insert(.maskSecondaryFn)
+        try postKey(63, isDown: true, flags: flags)
+        Thread.sleep(forTimeInterval: 0.04)
+        flags.remove(.maskSecondaryFn)
+        try postKey(63, isDown: false, flags: flags)
     }
 
     private func mediaKeyType(for functionCode: UInt8) -> Int32? {

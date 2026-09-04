@@ -183,7 +183,7 @@ public enum PresetNativeShortcutResolver {
             shortcut(action, leftCommand, leftShift, key(0x22))
         case .missionControl:
             shortcut(action, leftControl, key(0x52))
-        case .switchProfile, .brightnessUp, .brightnessDown:
+        case .fnDoubleTap, .switchProfile, .brightnessUp, .brightnessDown:
             .unsupported
         case .playPause:
             .fixedFunction(0x07)

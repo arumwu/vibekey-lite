@@ -86,7 +86,9 @@ final class ConfigStoreTests: XCTestCase {
         var profileA = expected[.a]
         var profileB = expected[.b]
         profileA[.topButton] = .preset(.f1)
+        profileA[.middleButton] = .preset(.fnDoubleTap)
         profileB[.middleButton] = .preset(.f12)
+        profileB[.topButton] = .preset(.fnDoubleTap)
         expected[.a] = profileA
         expected[.b] = profileB
 

@@ -151,9 +151,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.refreshUI()
                 return
             }
-            self.notice = control.isNativeHardwareControl
-                ? "設定已保存；按「設為離線備用」才會寫入 AU05。"
-                : "雙按設定已保存。"
+            if binding == .preset(.fnDoubleTap) {
+                self.notice = "Fn 按兩次已保存；只在 App 開啟時執行，離線六鍵未更動。"
+            } else {
+                self.notice = control.isNativeHardwareControl
+                    ? "設定已保存；按「設為離線備用」才會寫入 AU05。"
+                    : "雙按設定已保存。"
+            }
             self.refreshUI()
         }
         settings.onRestartApplication = { [weak self] in
@@ -778,6 +782,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
+        let profile = configuration[profileID]
+        if profile.indexedControlBindings.contains(where: {
+            $0.binding == .preset(.fnDoubleTap)
+        }) {
+            notice = "Fn 按兩次只在 App 開啟時執行；未改寫 AU05 的離線六鍵。"
+            refreshUI()
+            return
+        }
+
         if !needsHardwareSync {
             let previousConfiguration = configuration
             configuration.needsHardwareSync = true
@@ -797,7 +810,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             refreshUI()
             return
         }
-        let profile = configuration[profileID]
         notice = "正在寫入「\(profileID.displayName)」原生按鍵…"
         refreshUI()
 

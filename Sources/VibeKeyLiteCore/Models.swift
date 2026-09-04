@@ -58,6 +58,7 @@ public enum KeyAction: String, CaseIterable, Codable, Sendable {
     case returnKey
     case escape
     case tab
+    case fnDoubleTap
     case optionKey
     case rightOptionKey
     case leftArrow
@@ -110,6 +111,7 @@ public enum KeyAction: String, CaseIterable, Codable, Sendable {
         case .returnKey: "Return"
         case .escape: "Escape"
         case .tab: "Tab"
+        case .fnDoubleTap: "Fn 按兩次（App 開啟時）"
         case .optionKey: "左 Option"
         case .rightOptionKey: "右 Option"
         case .leftArrow: "方向鍵 ←"
@@ -159,7 +161,8 @@ public enum KeyAction: String, CaseIterable, Codable, Sendable {
 
     public var category: KeyActionCategory {
         switch self {
-        case .none, .space, .returnKey, .escape, .tab, .optionKey, .rightOptionKey:
+        case .none, .space, .returnKey, .escape, .tab, .fnDoubleTap,
+             .optionKey, .rightOptionKey:
             .basic
         case .leftArrow, .rightArrow, .upArrow, .downArrow,
              .deleteBackward, .deleteForward, .home, .end, .pageUp, .pageDown:

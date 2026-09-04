@@ -34,7 +34,7 @@ AU05 韌體只會離線保存單按。為了同時分辨三種手勢，VibeKey L
 
 ## Fn 限制
 
-Fn 不是一般 USB HID 按鍵，AU05 韌體無法把它保存成離線快捷鍵。錄製器遇到 Fn 會明確拒絕，不會偷換成別的按鍵；實機不會輸出的 `F19`、`F20` 也會被拒絕。Typeless 聽寫可直接使用「左 Option」。
+Fn 不是一般 USB HID 按鍵，AU05 韌體無法把它保存成離線快捷鍵。VibeKey Lite 開啟時，任何控制都可選「Fn 按兩次」，由 App 送出兩次 Fn；裝置內原有的離線按鍵不會被改寫。錄製器遇到實體 Fn 仍會明確拒絕，不會偷換成別的按鍵；實機不會輸出的 `F19`、`F20` 也會被拒絕。
 
 ## 使用方式
 
@@ -115,7 +115,7 @@ Online gestures require both Input Monitoring and Accessibility permission. If e
 
 ### Fn limitation
 
-Fn is not a normal USB HID key and cannot be stored as an offline AU05 shortcut. The recorder explicitly rejects Fn instead of substituting another key. It also rejects `F19` and `F20`, which the tested AU05 did not emit. Typeless dictation can use **Left Option** directly.
+Fn is not a normal USB HID key and cannot be stored as an offline AU05 shortcut. While VibeKey Lite is running, any control can select **Fn Double Tap**; the app sends two Fn taps without rewriting the device's existing offline keys. The recorder still rejects a physical Fn input instead of substituting another key. It also rejects `F19` and `F20`, which the tested AU05 did not emit.
 
 ### Usage
 
